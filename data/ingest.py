@@ -13,9 +13,24 @@ API_KEY = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 
 # ---- CUSTOMISE THESE ----
-SYMBOLS = ["AAPL", "MSFT", "GOOGL"]
-START_DATE = datetime(2023, 1, 1)
-END_DATE = datetime(2024, 12, 31)
+SYMBOLS = [
+    # Tech
+    "AAPL", "MSFT", "GOOGL", "NVDA", "META", "AMZN",
+    # Finance
+    "JPM", "GS", "BAC", "MS", "BLK",
+    # Healthcare
+    "JNJ", "UNH", "PFE", "ABBV",
+    # Energy
+    "XOM", "CVX", "COP",
+    # Consumer
+    "MCD", "NKE", "SBUX", "WMT", "COST",
+    # Industrial
+    "CAT", "BA", "HON", "GE",
+    # ETFs (useful for regime detection later)
+    "SPY", "QQQ", "VIX"
+]
+START_DATE = datetime(2020, 1, 1)
+END_DATE = datetime(2025, 12, 31)
 # --------------------------
 
 def fetch_ohlcv(symbols, start, end):
