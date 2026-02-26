@@ -35,17 +35,13 @@ def generate_signals(features_df):
                 continue
 
             # Oversold condition — potential buy
+            # Oversold condition — potential buy only
             if row["rsi_14"] < 35 and row["bb_pct"] < 0.25:
-                # How oversold? RSI 20 is more oversold than RSI 34
-                rsi_strength = (35 - row["rsi_14"]) / 35        # 0 to 1
-                bb_strength = (0.25 - row["bb_pct"]) / 0.25     # 0 to 1
-                signal = (rsi_strength + bb_strength) / 2        # average the two
-
-            # Overbought condition — potential sell
-            elif row["rsi_14"] > 65 and row["bb_pct"] > 0.75:
-                rsi_strength = (row["rsi_14"] - 65) / 35        # 0 to 1
-                bb_strength = (row["bb_pct"] - 0.75) / 0.25     # 0 to 1
-                signal = -((rsi_strength + bb_strength) / 2)     # negative = sell
+                rsi_strength = (35 - row["rsi_14"]) / 35
+                bb_strength = (0.25 - row["bb_pct"]) / 0.25
+                signal = (rsi_strength + bb_strength) / 2
+            else:
+                signal = 0.0  # no position, never short
 
             signals.append({
                 "date": time,

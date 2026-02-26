@@ -34,12 +34,11 @@ def generate_signals(features_df):
             raw_signal = 0.0
 
             # Top 20% by return + MACD confirming upward momentum
+            # Remove the sell signal block entirely, replace with:
             if row["return_rank"] >= 0.8 and row["macd_hist"] > 0:
-                raw_signal = 1.0
-
-            # Bottom 20% by return + MACD confirming downward momentum
-            elif row["return_rank"] <= 0.2 and row["macd_hist"] < 0:
-                raw_signal = -1.0
+                raw_signal = (row["return_rank"] - 0.8) / 0.2  # scales 0.8-1.0 → 0 to 1
+            else:
+                raw_signal = 0.0  # no position, never short
 
             # Scale signal strength by how extreme the return rank is
             # e.g. rank 0.95 is stronger than rank 0.82
