@@ -14,79 +14,70 @@ load_dotenv()
 # ── 1. FETCH NEWS FROM ALPACA ─────────────────────────────────────────────────
 
 def fetch_news_alpaca(symbols, start_date="2020-01-01", end_date="2025-12-31",
-                      limit_per_request=50):
-    """
-    Fetch financial news articles from Alpaca News API.
-    
-    Alpaca returns news with headline, summary, and full content.
-    We'll use headline + summary as input to FinBERT — full content
-    is often too long and adds noise.
-    
-    Rate limiting: Alpaca allows ~200 requests/minute on free tier.
-    We add a small sleep between requests to stay safe.
-    """
+                      limit_per_request=200):
     from alpaca.data.historical import NewsClient
     from alpaca.data.requests import NewsRequest
 
     api_key    = os.getenv("ALPACA_API_KEY")
     secret_key = os.getenv("ALPACA_SECRET_KEY")
-
-    client = NewsClient(api_key=api_key, secret_key=secret_key)
+    client     = NewsClient(api_key=api_key, secret_key=secret_key)
 
     all_articles = []
-    
-    # Fetch in monthly chunks to avoid hitting request limits
+    seen_ids     = set()  # deduplicate articles that mention multiple symbols
+
     start = datetime.strptime(start_date, "%Y-%m-%d")
     end   = datetime.strptime(end_date,   "%Y-%m-%d")
 
-    current = start
-    chunk_num = 1
-    
-    while current < end:
-        chunk_end = min(current + timedelta(days=30), end)
-        
-        print(f"  Fetching news chunk {chunk_num}: "
-              f"{current.strftime('%Y-%m-%d')} → {chunk_end.strftime('%Y-%m-%d')}", 
-              end="\r")
+    for sym_idx, symbol in enumerate(symbols):
+        print(f"  Fetching news for {symbol} ({sym_idx+1}/{len(symbols)})...")
+        current = start
 
-        try:
-            request = NewsRequest(
-                symbols=",".join(symbols),
-                start=current.strftime("%Y-%m-%dT00:00:00Z"),
-                end=chunk_end.strftime("%Y-%m-%dT00:00:00Z"),
-                limit=limit_per_request,
-                sort="DESC"
-            )
-            news = client.get_news(request)
+        while current < end:
+            chunk_end = min(current + timedelta(days=90), end)  # quarterly chunks per symbol
 
-            # Response is a NewsSet — data lives in news.data['news']
-            articles = []
-            for key, val in news:
-                if key == "data" and isinstance(val, dict) and "news" in val:
-                    articles = val["news"]
-                    break
+            try:
+                request = NewsRequest(
+                    symbols=symbol,
+                    start=current.strftime("%Y-%m-%dT00:00:00Z"),
+                    end=chunk_end.strftime("%Y-%m-%dT00:00:00Z"),
+                    limit=limit_per_request,
+                    sort="DESC"
+                )
+                news = client.get_news(request)
 
-            for article in articles:
-                article_symbols = getattr(article, "symbols", []) or []
-                created = getattr(article, "created_at", None)
-                if created is None:
-                    continue
-                all_articles.append({
-                    "date":     pd.to_datetime(created).normalize().tz_localize(None),
-                    "headline": getattr(article, "headline", "") or "",
-                    "summary":  getattr(article, "summary",  "") or "",
-                    "symbols":  article_symbols,
-                    "source":   getattr(article, "source",   "") or "",
-                })
+                articles = []
+                for key, val in news:
+                    if key == "data" and isinstance(val, dict) and "news" in val:
+                        articles = val["news"]
+                        break
 
-        except Exception as e:
-            print(f"\n  Warning: chunk {chunk_num} failed: {e}")
+                for article in articles:
+                    article_id = getattr(article, "id", None)
+                    if article_id and article_id in seen_ids:
+                        continue  # skip duplicates
+                    if article_id:
+                        seen_ids.add(article_id)
 
-        current = chunk_end + timedelta(days=1)
-        chunk_num += 1
-        time.sleep(0.3)  # stay within rate limits
+                    article_symbols = getattr(article, "symbols", []) or []
+                    created = getattr(article, "created_at", None)
+                    if created is None:
+                        continue
 
-    print(f"\n  Fetched {len(all_articles):,} articles total")
+                    all_articles.append({
+                        "date":     pd.to_datetime(created).normalize().tz_localize(None),
+                        "headline": getattr(article, "headline", "") or "",
+                        "summary":  getattr(article, "summary",  "") or "",
+                        "symbols":  article_symbols,
+                        "source":   getattr(article, "source",   "") or "",
+                    })
+
+            except Exception as e:
+                print(f"\n    Warning: {symbol} chunk failed: {e}")
+
+            current = chunk_end + timedelta(days=1)
+            time.sleep(0.3)
+
+    print(f"\n  Fetched {len(all_articles):,} articles total ({len(seen_ids):,} unique)")
     return pd.DataFrame(all_articles)
 
 
