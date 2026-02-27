@@ -58,6 +58,13 @@ def train_hmm(features_df, n_states=3, n_iter=200, random_state=42):
 
     X = features_df[feature_cols].values
 
+    # Clip outliers at 1st and 99th percentile before scaling
+    # Without this, one extreme day (e.g. COVID bounce March 2020) 
+    # consumes an entire HMM state on its own
+    lower = np.percentile(X, 1, axis=0)
+    upper = np.percentile(X, 99, axis=0)
+    X = np.clip(X, lower, upper)
+
     # Standardise — HMM is sensitive to feature scale
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
@@ -87,16 +94,15 @@ def label_regimes(features_df, model, scaler, feature_cols):
     features_df = features_df.copy()
     features_df["raw_state"] = raw_states
 
-    # Map states to labels based on mean return per state
-    # Highest avg return → Bull, Lowest → Bear, Middle → Choppy
-    state_returns = (
-        features_df.groupby("raw_state")["mean_return"].mean().sort_values()
+    # Label by volatility — much more stable than return
+    # Lowest volatility → bull, highest → bear, middle → choppy
+    state_vols = (
+        features_df.groupby("raw_state")["mean_volatility"].mean().sort_values()
     )
-    # state_returns.index is sorted ascending by return
     label_map = {
-        state_returns.index[0]: "bear",
-        state_returns.index[1]: "choppy",
-        state_returns.index[2]: "bull",
+        state_vols.index[0]: "bull",
+        state_vols.index[1]: "choppy",
+        state_vols.index[2]: "bear",
     }
     features_df["regime"] = features_df["raw_state"].map(label_map)
 
