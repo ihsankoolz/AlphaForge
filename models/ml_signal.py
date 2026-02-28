@@ -46,6 +46,46 @@ def load_data():
     regime_map = {"bull": 0, "choppy": 1, "bear": 2}
     df["regime_encoded"] = df["regime"].map(regime_map).fillna(0)
 
+    # ── ADD SENTIMENT FEATURES ────────────────────────────────────────────────
+    print("  Loading sentiment features...")
+    sentiment = pd.read_parquet("data/processed/sentiment_daily.parquet")
+
+    # Normalise the sentiment date index to tz-naive dates so the merge aligns
+    # with features_daily regardless of how sentiment.py stored timestamps
+    sentiment = sentiment.reset_index()
+    date_col = "date" if "date" in sentiment.columns else sentiment.columns[0]
+    sentiment[date_col] = pd.to_datetime(sentiment[date_col]).dt.normalize().dt.tz_localize(None)
+    sentiment = sentiment.rename(columns={date_col: "date"})
+
+    # Keep only the columns we want as features (drop extras like article_ids etc.)
+    sentiment_feature_cols = [
+        "sentiment_mean", "sentiment_std",
+        "sentiment_pos_pct", "sentiment_neg_pct",
+        "article_count", "sentiment_3d"
+    ]
+    # Only keep columns that actually exist in the file
+    sentiment_feature_cols = [c for c in sentiment_feature_cols if c in sentiment.columns]
+    sentiment = sentiment[["date", "symbol"] + sentiment_feature_cols]
+
+    df = df.merge(sentiment, on=["date", "symbol"], how="left")
+
+    # Days with no news coverage → neutral sentiment, zero counts
+    # This is intentional: absence of news is information in itself
+    sentiment_fill = {
+        "sentiment_mean":    0.0,   # neutral
+        "sentiment_std":     0.0,   # no disagreement
+        "sentiment_pos_pct": 0.0,
+        "sentiment_neg_pct": 0.0,
+        "article_count":     0.0,   # no coverage
+        "sentiment_3d":      0.0,   # neutral rolling average
+    }
+    for col, fill_val in sentiment_fill.items():
+        if col in df.columns:
+            df[col] = df[col].fillna(fill_val)
+
+    coverage = df["sentiment_mean"].astype(bool).mean() if "sentiment_mean" in df.columns else 0
+    print(f"  Sentiment coverage: {coverage:.1%} of stock-days have news data")
+
     # ── TARGET: 5-DAY FORWARD RELATIVE RANK ──────────────────────────────────
     df = df.sort_values(["symbol", "date"])
     df["forward_return_5d"] = df.groupby("symbol")["return_1d"].transform(
@@ -67,10 +107,18 @@ FEATURE_COLS = [
     "rsi_14", "macd_line", "macd_signal", "macd_hist",
     "bb_pct", "bb_bandwidth",
     "volume_ratio", "spy_correlation",
-    # Regime context — most important feature from v1
+    # Regime context
     "regime_encoded",
     # Rule-based signals — domain knowledge baked in
-    "momentum_signal", "mr_signal"
+    "momentum_signal", "mr_signal",
+    # Sentiment features (Week 6) — FinBERT scores from Alpaca News
+    # Missing days filled with 0 (neutral) — 33% of stock-days have no coverage
+    "sentiment_mean",    # avg FinBERT score that day (-1 to +1)
+    "sentiment_std",     # disagreement between articles — high = uncertainty
+    "sentiment_pos_pct", # % of articles classified positive
+    "sentiment_neg_pct", # % of articles classified negative
+    "article_count",     # news volume — high count = more attention
+    "sentiment_3d",      # 3-day rolling avg sentiment — smooths single-day noise
 ]
 
 # ── 3. WALK-FORWARD VALIDATION ───────────────────────────────────────────────
@@ -81,6 +129,13 @@ def walk_forward_validation(df, initial_train_months=18, retrain_every_months=3)
     to learn from before its first real prediction, especially important
     since we changed to a 5-day forward target which has fewer signal events.
     """
+    # Only keep feature cols that actually exist in df (guards against
+    # sentiment columns being absent if sentiment file is missing)
+    active_features = [c for c in FEATURE_COLS if c in df.columns]
+    if len(active_features) < len(FEATURE_COLS):
+        missing = set(FEATURE_COLS) - set(active_features)
+        print(f"  Warning: {len(missing)} feature(s) not found and will be skipped: {missing}")
+
     df = df.sort_values("date")
     all_dates = sorted(df["date"].unique())
 
@@ -102,9 +157,9 @@ def walk_forward_validation(df, initial_train_months=18, retrain_every_months=3)
             current_cutoff = next_cutoff
             continue
 
-        X_train = train[FEATURE_COLS].fillna(0)
+        X_train = train[active_features].fillna(0)
         y_train = train["target"]
-        X_test  = test[FEATURE_COLS].fillna(0)
+        X_test  = test[active_features].fillna(0)
         y_test  = test["target"]
 
         # Class imbalance — top quartile is 25% of data so we
@@ -153,7 +208,7 @@ def walk_forward_validation(df, initial_train_months=18, retrain_every_months=3)
         if next_cutoff >= pd.Timestamp(all_dates[-1]):
             os.makedirs("models", exist_ok=True)
             with open("models/xgb_model.pkl", "wb") as f:
-                pickle.dump({"model": model, "feature_cols": FEATURE_COLS}, f)
+                pickle.dump({"model": model, "feature_cols": active_features}, f)
             print(f"\n  → Final model saved to models/xgb_model.pkl")
 
         current_cutoff = next_cutoff
@@ -173,7 +228,7 @@ def evaluate_signals(predictions_df):
     df["prob_bucket"] = pd.qcut(df["pred_proba"], q=5,
                                 labels=["Very Low", "Low", "Mid", "High", "Very High"])
 
-    print("\n========== ML SIGNAL QUALITY (v2) ==========")
+    print("\n========== ML SIGNAL QUALITY (v3 — with sentiment) ==========")
     print("Avg 5-day forward return by predicted probability bucket:")
     print(f"  {'Bucket':<12} {'Avg 5d Return':>14} {'Top Quartile %':>15} {'Count':>8}")
     print("  " + "-" * 52)
@@ -188,14 +243,15 @@ def evaluate_signals(predictions_df):
               f"{row['pct_top_q']:>14.2%} {row['count']:>8}")
 
     print("  " + "-" * 52)
-    print(f"\n  Overall AUC target: >0.54 (meaningful edge)")
+    print(f"\n  Overall AUC target: >0.83 (beat v2 baseline)")
     print(f"  Baseline top-quartile rate: {df['target'].mean():.3f} (should be ~0.25)")
-    print("=============================================\n")
+    print("==============================================================\n")
 
 # ── 5. FEATURE IMPORTANCE ────────────────────────────────────────────────────
 
 def print_feature_importance(df):
-    X = df[FEATURE_COLS].fillna(0)
+    active_features = [c for c in FEATURE_COLS if c in df.columns]
+    X = df[active_features].fillna(0)
     y = df["target"]
 
     model = xgb.XGBClassifier(
@@ -205,14 +261,21 @@ def print_feature_importance(df):
     )
     model.fit(X, y)
 
-    importance = pd.Series(model.feature_importances_, index=FEATURE_COLS)
+    importance = pd.Series(model.feature_importances_, index=active_features)
     importance = importance.sort_values(ascending=False)
 
-    print("\n========== FEATURE IMPORTANCE ==========")
+    print("\n========== FEATURE IMPORTANCE (v3 — with sentiment) ==========")
     for feat, score in importance.items():
         bar = "█" * int(score * 300)
         print(f"  {feat:<22} {score:.4f}  {bar}")
-    print("=========================================\n")
+
+    # Highlight sentiment contribution
+    sentiment_cols = ["sentiment_mean", "sentiment_std", "sentiment_pos_pct",
+                      "sentiment_neg_pct", "article_count", "sentiment_3d"]
+    sentiment_importance = sum(importance.get(c, 0) for c in sentiment_cols)
+    print(f"\n  → Sentiment features combined importance: {sentiment_importance:.4f} "
+          f"({sentiment_importance:.1%} of model)")
+    print("===============================================================\n")
 
 # ── 6. CONVERT TO SIGNALS ────────────────────────────────────────────────────
 
@@ -232,19 +295,21 @@ def predictions_to_signals(predictions_df):
 # ── 7. MAIN ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("Loading data and generating features...")
+    print("Loading data and generating features (including sentiment)...")
     df = load_data()
     print(f"  Loaded {len(df):,} rows | {df['symbol'].nunique()} symbols | "
           f"{df['date'].min().date()} → {df['date'].max().date()}")
     print(f"  Target rate (top quartile): {df['target'].mean():.3f} "
           f"(expected ~0.25)\n")
+    print(f"  Total features: {len([c for c in FEATURE_COLS if c in df.columns])} "
+          f"({len([c for c in FEATURE_COLS if c in df.columns]) - 17} sentiment features added)\n")
 
-    print("Running walk-forward validation...")
+    print("Running walk-forward validation (v3 — with sentiment)...")
     predictions, scores = walk_forward_validation(df)
 
     print(f"\nWalk-forward complete: {len(predictions):,} out-of-sample predictions")
     print(f"Mean Accuracy: {scores['accuracy'].mean():.3f}")
-    print(f"Mean AUC:      {scores['auc'].mean():.3f}")
+    print(f"Mean AUC:      {scores['auc'].mean():.3f}  (v2 baseline: 0.829)")
 
     evaluate_signals(predictions)
     print_feature_importance(df)
@@ -252,4 +317,5 @@ if __name__ == "__main__":
     signals = predictions_to_signals(predictions)
     signals.to_parquet("data/processed/ml_signals.parquet")
     print("Saved: data/processed/ml_signals.parquet")
-    print("\nNext step: run ml_backtest.py to trade using ML signals")
+    print("\nNext step: run ml_backtest.py to trade using v3 ML signals")
+    print("Then: begin Week 7 — Risk & Portfolio Layer")

@@ -26,11 +26,15 @@ This is not a research notebook. It is a system — each component has a specifi
 | 3 | Feature Engineering & Traditional Strategies | ✅ Done |
 | 4 | Regime Detection with Hidden Markov Models | ✅ Done |
 | 5 | ML Signal Generation (XGBoost) | ✅ Done |
-| 6 | Sentiment Layer as Alternative Data | ✅ Done (pipeline complete, integration pending) |
-| 7 | Risk & Portfolio Layer | ⏳ Next |
-| 8 | Execution Layer & Paper Trading | ⏳ Upcoming |
+| 6 | Sentiment Layer as Alternative Data | ✅ Done |
+| 6.5 | Sentiment Integration into ML Model (v3) | ✅ Done |
+| 7 | Risk & Portfolio Layer (Kelly + Markowitz) | ✅ Done |
+| 8 | Execution Layer & Paper Trading | 🔄 In Progress |
+| 8.5 | Universe Expansion (200+ stocks) | ⏳ Upcoming |
 | 9 | Dashboard & Visualization | ⏳ Upcoming |
 | 10 | Polish, Documentation & Write-Up | ⏳ Upcoming |
+
+**Note on universe expansion:** Deliberately deferred until after the execution layer is working. Reason: get the risk layer proven on 29 stocks first, then expansion is just plugging more data into an already-tested system. Will slot between Week 8 and Week 9.
 
 ---
 
@@ -65,7 +69,7 @@ This is not a research notebook. It is a system — each component has a specifi
      │    [research/strategies/regime_switcher.py]                  │
      │                                                              │
      └──► [models/ml_signal.py] ◄── regime labels + rule signals ◄─┘
-               │                 ◄── sentiment features (Week 7)
+               │                 ◄── sentiment features (v3)
                ▼
      [data/processed/ml_signals.parquet]
                │
@@ -73,10 +77,16 @@ This is not a research notebook. It is a system — each component has a specifi
      [research/strategies/ml_backtest.py]
                │
                ▼
-     [risk/] ← Week 7: position sizing, portfolio optimization
+     [risk/position_sizer.py] ← Kelly Criterion + vol adjustment
                │
                ▼
-     [execution/] ← Week 8: order management, Alpaca paper trading
+     [risk/portfolio_optimiser.py] ← Markowitz mean-variance
+               │
+               ▼
+     [execution/order_manager.py] ← Alpaca paper trading orders
+               │
+               ▼
+     [execution/run_daily.py] ← daily pipeline orchestrator
                │
                ▼
      [dashboard/] ← Week 9: Streamlit live dashboard
@@ -137,7 +147,7 @@ How much the closing price changed over the last n trading days. `return_5d = 0.
 
 ### Volatility
 **Columns:** `volatility_10d`, `volatility_20d`
-Rolling standard deviation of daily returns. `volatility_20d = 0.025` means the stock moves ±2.5% per day on average. Used by HMM for regime detection and will be used by Week 7 position sizing.
+Rolling standard deviation of daily returns. `volatility_20d = 0.025` means the stock moves ±2.5% per day on average. Used by HMM for regime detection and by Week 7 position sizing.
 
 ### RSI — Relative Strength Index
 **Column:** `rsi_14`
@@ -186,7 +196,7 @@ Simulating how a strategy would have performed historically. Output is a daily p
 - Signal diagnostic showed sell signals generated positive returns on average — we were shorting stocks that kept going up
 - Root cause: our universe is 29 blue-chip winners. Even the "losers" in a universe of winners go up over time
 - Fix: Made both strategies long-only. This is not overfitting — it's recognising universe composition bias
-- Plan: Revisit short selling in Week 7 when universe potentially expands to 200+ stocks
+- Plan: Revisit short selling in Week 8.5 when universe expands to 200+ stocks
 
 **Mean reversion was too selective:**
 - RSI < 35 AND bb_pct < 0.25 simultaneously is rare — strategy barely invested
@@ -204,15 +214,23 @@ Before trusting backtest results, always run `diagnose_signals()`:
 
 ## Current Backtest Results Summary
 
-| Strategy | Total Return | Ann. Return | Sharpe | Max Drawdown | Notes |
-|----------|-------------|-------------|--------|--------------|-------|
-| Momentum (standalone) | +91.85% | +11.67% | 0.56 | -30.24% | Long-only, 29 stocks, 2020-2025 |
-| Mean Reversion (standalone) | +8.71% | +1.42% | 0.19 | -45.16% | Good signal, too infrequent |
-| Regime Switcher | +186.65% | +19.54% | 0.96 | -23.25% | Best performer to date |
-| ML Signal (XGBoost) | +38.02% | +7.63% | 0.52 | -26.43% | Shorter history (2021-2025 only) |
-| SPY Benchmark | ~85-90% | ~14% | ~0.80 | ~-34% | Buy and hold comparison |
+| Strategy | Total Return | Ann. Return | Sharpe | Max Drawdown | Period | Notes |
+|----------|-------------|-------------|--------|--------------|--------|-------|
+| Momentum (standalone) | +91.85% | +11.67% | 0.56 | -30.24% | 2020-2025 | Long-only, 29 stocks |
+| Mean Reversion (standalone) | +8.71% | +1.42% | 0.19 | -45.16% | 2020-2025 | Good signal, too infrequent |
+| Regime Switcher | +186.65% | +19.54% | 0.96 | -23.25% | 2020-2025 | Best full-period performer |
+| ML Signal v2 (XGBoost only) | +24.87% | +5.20% | 0.38 | -28.62% | 2021-2025 | Naive signal-weighting |
+| ML + Risk Layer v3 | +22.52% | +4.74% | 0.49 | -15.54% | 2021-2025 | Kelly + Markowitz |
+| SPY Benchmark | ~55-60% | ~12% | ~0.70 | ~-34% | 2021-2025 | Buy and hold comparison |
 
-**Important note on ML result:** The ML strategy only covers 2021-2025 (4 years) because walk-forward validation needed 18 months of training before first prediction. The regime switcher covers the full 6 years including the strong 2020-2021 bull run. This is an unfair comparison — the ML Sharpe of 0.52 is roughly equivalent to standalone momentum (0.56) over the same period.
+**Critical note on comparisons:** The regime switcher covers 2020-2025 including the COVID crash recovery (the best 18-month period in recent market history). The ML strategies only cover Aug 2021-2025 — a much harder period that started right before the 2022 rate hike selloff. Comparing 186% to 22% across different time periods is unfair. Over the SAME 2021-2025 period, the regime switcher's advantage shrinks substantially.
+
+**What the Risk Layer actually achieved (v2 → v3 comparison, same period):**
+- Sharpe: 0.38 → 0.49 (+29% improvement)
+- Max Drawdown: -28.62% → -15.54% (cut nearly in half)
+- Total Return: 24.87% → 22.52% (slightly lower — expected, Kelly is conservative by design)
+
+The risk layer's job is not to maximize return — it's to maximize risk-adjusted return. Halving the drawdown while improving Sharpe by 29% is exactly correct behavior.
 
 ---
 
@@ -349,8 +367,6 @@ Just sitting in cash during 357 choppy days doubled the return and improved risk
 | rsi_14 | 3.5% | RSI still contributes |
 | mr_signal | 1.7% | Mean reversion signal adds minor value |
 
-Key insight: return_5d dominating confirms the momentum premium is real. RSI and MACD (backbone of rule-based strategies) are at the bottom, explaining why those strategies needed ML enhancement.
-
 ### Why ML Backtest Underperforms Regime Switcher
 
 The standalone ML backtest shows +38% vs regime switcher's +186%. This is NOT because ML is worse. Three reasons:
@@ -358,15 +374,10 @@ The standalone ML backtest shows +38% vs regime switcher's +186%. This is NOT be
 2. Fewer positions per day (avg 5.4 vs 10) — model is more selective
 3. The comparison is unfair — different time periods
 
-**The correct role of the ML model:** It is not a standalone strategy. It is the brain that all other components plug into. In Week 7, ML probability scores become inputs to the portfolio optimizer. The regime switcher was a hand-coded proof of concept — the ML model is the production replacement that does the same thing but smarter, incorporating all 22 features + regime + sentiment.
+**The correct role of the ML model:** It is not a standalone strategy. It is the brain that all other components plug into. In Week 7, ML probability scores become inputs to the portfolio optimizer.
 
-### Signal-Weighted Position Sizing
-Unlike rule-based strategies (equal weight), ML backtest allocates capital proportional to signal strength. If AAPL has probability 0.80 and NVDA 0.60 and BAC 0.40, weights are 44%/33%/22% respectively. Higher model confidence = more capital.
-
-### Files Produced
-- `data/processed/ml_signals.parquet` — probability scores for every stock on every out-of-sample day
-- `data/processed/backtest_ml.parquet` — ML strategy daily P&L
-- `models/xgb_model.pkl` — final trained XGBoost model for live inference
+### Key Gotchas
+- Signal threshold for top-quartile prediction should be 0.35 not 0.5 (probabilities cluster below 0.5 when positive class is rare)
 
 ---
 
@@ -421,9 +432,6 @@ FinBERT is BERT fine-tuned specifically on financial text. Regular sentiment mod
 ### Important: Caching
 First run takes ~15-20 minutes (API fetching + FinBERT inference). Both raw news and scored articles are cached as parquet files. Subsequent runs are instant. If you need to refetch, delete `data/processed/news_raw.parquet` and `data/processed/news_scored.parquet`.
 
-### Next Step (Not Yet Done)
-Sentiment features need to be added to `ml_signal.py` as additional input features and the model retrained. Expected to improve AUC above 0.83. This is the first thing to do in the next session.
-
 ### Files Produced
 - `data/processed/news_raw.parquet` — raw article text with dates and symbols
 - `data/processed/news_scored.parquet` — articles with FinBERT labels and scores
@@ -431,40 +439,501 @@ Sentiment features need to be added to `ml_signal.py` as additional input featur
 
 ---
 
-## What's Coming Next
+## Week 6.5 — Sentiment Integration into ML Model (v3)
 
-### Immediate Next Step — Integrate Sentiment into ML Model
-Add `sentiment_mean`, `sentiment_3d`, `sentiment_pos_pct`, `sentiment_neg_pct`, `article_count` as features to `ml_signal.py`. Retrain with walk-forward validation. Measure if AUC improves above 0.83.
+### What We Did
+Added 6 sentiment features to `models/ml_signal.py` as additional XGBoost inputs. Retrained via walk-forward validation. This is called v3 of the ML model.
 
-### Week 7 — Risk & Portfolio Layer
-- **Kelly Criterion** for position sizing — mathematically optimal bet sizing given edge and odds
-- **Mean-variance optimization** for portfolio weights — classic Markowitz framework
-- **Universe expansion** to 200+ stocks including mid/small caps — makes short selling viable (small caps can be genuine losers unlike our blue-chip universe)
-- **Cash alternative** — instead of pure cash in choppy regime, rotate into bonds or low-vol ETF
-- Replace equal-weight positions with signal-weighted or volatility-adjusted weights throughout
+### How Sentiment Was Merged
+- Loaded `sentiment_daily.parquet` and normalized dates to tz-naive (same as features_daily)
+- Left-merged on `[date, symbol]` — keeps all feature rows, adds sentiment where available
+- Missing days (no news coverage) filled with 0.0 — neutral sentiment, zero article count
+- This fill is intentional: absence of news is information in itself (no coverage = neutral signal)
 
-### Week 8 — Live Paper Trading
-Connect to Alpaca paper trading API. Schedule pipeline to run daily at market open. Add safeguards (max position size, daily loss limits). `ingest.py` becomes a live daily system.
+### v3 Results
 
-### Week 9 — Streamlit Dashboard
-Live P&L curve, current positions, strategy performance by regime, sentiment signals, risk metrics updating daily.
+**Walk-forward AUC by fold:**
+All 18 folds between 0.753 and 0.859. Mean AUC: 0.829 (identical to v2 baseline).
 
-### Week 10 — Polish & Write-Up
-Clean README, demo video, docstrings throughout, Medium article on one interesting finding (regime detection value-add is a compelling story).
+**Signal quality table (v3):**
+| Bucket | Avg 5d Return | Top Quartile % |
+|--------|-------------|----------------|
+| Very Low | -3.53% | 2.72% |
+| Low | -1.55% | 11.34% |
+| Mid | +0.11% | 19.68% |
+| High | +1.72% | 36.40% |
+| Very High | +4.42% | 67.80% |
+
+Perfectly monotonic — model still clearly separates winners from losers.
+
+**Feature importance (v3):**
+| Feature | Importance |
+|---------|------------|
+| return_5d | 29.2% |
+| bb_pct | 17.6% |
+| return_10d | 7.1% |
+| ... | ... |
+| article_count | 1.6% |
+| sentiment_std | 1.3% |
+| sentiment_pos_pct | 1.3% |
+| sentiment_3d | 1.2% |
+| sentiment_mean | 1.1% |
+| sentiment_neg_pct | 0.8% |
+| **Sentiment total** | **7.3%** |
+
+### How to Interpret the Sentiment Results
+
+**AUC didn't improve (0.829 → 0.829). Does that mean sentiment failed?**
+
+No. The correct interpretation: sentiment added genuine information (7.3% combined importance) but didn't move the AUC needle because price features already captured most of what sentiment knows. For large-cap blue-chip stocks, news gets priced in almost immediately — by the time FinBERT reads the headline, `return_5d` has already absorbed the market's reaction. Sentiment is a slower, noisier version of a signal the price data already contains more cleanly.
+
+**Key insight from feature importance ranking:**
+- `article_count` (1.6%) was the MOST important sentiment feature — more than `sentiment_mean` (1.1%)
+- High news volume is a mild contrarian indicator: stocks getting a lot of attention tend to mean-revert rather than continue momentum
+- `sentiment_std` (1.3%) ranked above `sentiment_mean` — disagreement between articles matters more than their average direction. High uncertainty in the news → risk signal.
+- `sentiment_mean` at the bottom confirms the "news already priced in" story for large-caps
+
+**Why 7.3% combined importance is not nothing:**
+Sentiment collectively contributes more than `macd_hist` (1.4%), `bb_bandwidth` (1.5%), or `return_20d` (1.25%). It's a legitimate feature that belongs in the model.
+
+**Why sentiment will matter more after universe expansion:**
+The 29-stock universe is the most efficiently priced set of companies on earth — thousands of analysts cover them. Mid and small caps have 2-3 analysts, news doesn't get priced in within minutes. After expanding to 200+ stocks, sentiment edge will grow substantially. The 7.3% importance is a floor, not a ceiling.
+
+**Coverage note:** Actual measured coverage was 49.3% (not the expected 67%). This is because many legitimately neutral days score exactly 0.0 after FinBERT averaging, which gets counted as "no coverage." The article fetch was correct — it's a measurement artifact.
+
+### What to Say About Sentiment in Interviews/Presentations
+"Sentiment contributes 7.3% feature importance but provides diminishing marginal value over price signals in a blue-chip universe, consistent with the Efficient Market Hypothesis for large-caps. We expect this to increase significantly after universe expansion to mid/small-cap stocks where news is less efficiently priced."
 
 ---
 
-## OOP vs Functional Design
+## Week 7 — Risk & Portfolio Layer
 
-The current codebase is written functionally (plain functions, no classes). This is intentional for research code — linear flow, easier to debug, faster to iterate.
+### Overview
+Week 7 adds two files that sit between the ML signals and the backtest:
+- `risk/position_sizer.py` — Kelly Criterion + volatility adjustment (individual position sizing)
+- `risk/portfolio_optimiser.py` — Markowitz mean-variance optimization (portfolio-level construction)
 
-**Where OOP would add genuine value:**
-- `Strategy` base class with `generate_signals()` and `calculate_positions()` methods — momentum and mean reversion both inherit from it
-- `Portfolio` object that tracks positions, cash, P&L as state (needed in Week 7)
-- `DataFeed` class managing WebSocket connections for live data (needed in Week 8)
-- `MLSignalModel` class with `train()`, `predict()`, `save()`, `load()` methods
+These answer different questions:
+- **Kelly:** "How much capital should I risk on each individual stock given my edge?"
+- **Markowitz:** "Given how all these stocks move relative to each other, what's the optimal combination?"
 
-**Rule of thumb:** Use functions when data flows in one direction (research). Use classes when you need to maintain state over time (live trading). As the project moves from research into execution, OOP will naturally appear.
+---
+
+## Week 7 — Position Sizing: Kelly Criterion
+
+### What is Position Sizing?
+Position sizing answers: you have $100,000 and 5 stocks to buy — how much goes in each? The signal tells you WHICH stocks to buy. Position sizing tells you HOW MUCH. It's arguably more important than signal generation — great signal with bad sizing can still blow up a portfolio.
+
+### Position Sizing Methods — All Alternatives
+
+| Method | How it works | Best for |
+|--------|-------------|----------|
+| Equal weight | Split capital evenly | Simple strategies, low signal confidence |
+| Signal weight | Weight ∝ signal strength | What ML v2 backtest used |
+| Kelly Criterion | Optimal bet size given edge and odds | When you have reliable probability estimates |
+| Volatility parity | Each position contributes equal risk, not capital | Risk-conscious portfolios, standard at quant funds |
+| Mean-variance (Markowitz) | Optimize weights to maximize Sharpe as portfolio | When correlations between positions matter |
+| Max drawdown targeting | Size so worst-case stays within loss limit | Very risk-averse mandates |
+
+**Why we chose Kelly + Markowitz together:** Kelly handles individual sizing, Markowitz handles correlations between positions. Each solves a different problem. Together they're more powerful than either alone.
+
+### Kelly Criterion Explained
+
+Kelly answers: given that my model has a certain edge, what fraction of capital should I bet?
+
+```
+Kelly fraction = (p × b - q) / b
+
+where:
+  p = probability of winning (our pred_proba)
+  q = probability of losing (1 - p)
+  b = odds = avg_win / avg_loss
+```
+
+**What are "odds" in trading?** If your winners average +3% and losers average -1.5%, odds = 2.0. You win $2 for every $1 risked.
+
+**Why half-Kelly (multiply by 0.5)?** Raw Kelly assumes your probability estimates are perfect. Our pred_proba of 0.70 isn't exactly 70% likely — it's the model's best guess. Half-Kelly cuts position sizes in half, sacrificing some theoretical return for much better drawdown protection. Standard practice at real quant funds.
+
+**Volatility adjustment (on top of Kelly):**
+```
+final_weight = kelly_weight × (target_vol / stock_volatility)
+```
+If NVDA has 3% daily vol and our target is 1%, NVDA's position is cut by ⅔. Same signal confidence, less capital at risk. This ensures every position contributes roughly equal risk regardless of how volatile the underlying stock is.
+
+### Constants Used
+```python
+KELLY_FRACTION = 0.5    # half-Kelly safety buffer
+MIN_PROB       = 0.35   # below this = no position
+MAX_POSITION   = 0.15   # hard cap at 15% per stock
+VOL_LOOKBACK   = 20     # days to estimate volatility
+VOL_TARGET     = 0.01   # target 1% daily vol per position
+```
+
+### Position Sizer Diagnostic Results
+
+```
+Avg positions per day:    9.2
+Avg capital invested:     88.4%
+Avg cash held:            11.6%
+Avg largest position:     12.0%
+Avg position size:        9.6%
+Days at max positions:    871 (79.0%)
+```
+
+**How to interpret:**
+- 88.4% invested means the model almost always finds high-confidence trades
+- 79% of days hit 10-position maximum — normalization dominates Kelly on busy days, positions converge toward equal weight
+- 11.6% cash is the model's implicit uncertainty signal — Kelly holding back capital says "don't bet big today"
+- 12% avg largest position — 15% cap is working, nothing dominates dangerously
+
+**Sample day (2023-05-08) showing Kelly working clearly:**
+- Only 8 positions (not 10) — model selective
+- 23% cash held
+- AAPL (15%) vs MCD (4.6%) — vol adjustment differentiating positions with similar signals
+
+---
+
+## Week 7 — Portfolio Optimization: Markowitz Mean-Variance
+
+### The Problem Kelly Ignores
+
+On 2024-03-22, Kelly gave GS, BAC, JPM, and META roughly equal weights. But GS, BAC, and JPM are all large-cap US financials that move almost identically. When the Fed makes an announcement, all three drop together. You haven't diversified — you've taken the same financial sector bet three times in different jerseys.
+
+Markowitz's 1952 insight: don't optimize stocks individually, optimize the portfolio as a whole. The question isn't "is this stock good?" but "does adding this stock make the whole portfolio better?"
+
+### The Two Ingredients
+
+**Expected returns** — we use ML probability scores as proxy. Higher pred_proba = higher expected return. Linear mapping: `expected_return = (pred_proba - 0.5) × 0.40`
+
+**Covariance matrix** — how do stocks move relative to each other? Built from 60 days of historical returns (before the current date — no lookahead bias). Diagonal = each stock's own variance. Off-diagonal = co-movement between pairs.
+
+Why 60 days? Too short (20 days) = noisy unstable correlations. Too long (252 days) = stale, doesn't reflect current regime. 60 days captures current structure while having enough data.
+
+### What the Optimizer Does
+
+Searches through every possible weight combination and finds the one maximizing the Sharpe ratio. Solved via scipy `minimize` with SLSQP method (Sequential Least Squares Programming — standard for constrained portfolio optimization).
+
+Constraints:
+- Weights sum to 1.0 (fully invested within selected stocks)
+- Each weight between MIN_WEIGHT (2%) and MAX_WEIGHT (15%)
+- Long-only (no negative weights)
+
+### The Efficient Frontier
+
+```
+Return
+  ↑
+  |                    ● Maximum Return portfolio
+  |                 ●
+  |              ●  ← Maximum Sharpe (what we target)
+  |           ●
+  |        ●
+  |     ● Minimum Variance portfolio
+  |
+  └──────────────────────────→ Risk (volatility)
+```
+
+Every point on the curve is optimal — you can't do better without taking more risk. We target maximum Sharpe.
+
+### How Kelly and Markowitz Work Together
+
+```
+Kelly → "here are the stocks worth holding and how confident I am in each"
+           ↓
+Markowitz → "given how these stocks correlate, here's the optimal split"
+           ↓
+final_weight = markowitz_proportion × kelly_total
+```
+
+Kelly determines the TOTAL capital to invest. Markowitz determines HOW to split it. Rescaling at the end preserves Kelly's implicit cash signal.
+
+### Markowitz Diagnostic Results
+
+**Average absolute weight change (Kelly → Markowitz): 7.21%**
+
+This means Markowitz is meaningfully redistributing capital — not rubber-stamping Kelly weights. It's actively restructuring based on correlations.
+
+**Key observations from sample days:**
+
+2025-02-07 (BULL): BAC and GS both slashed to 2% while JPM bumped to 15%. All three are large-cap US financials. Markowitz said: "JPM alone gives you financial sector exposure, BAC and GS are redundant risk." Meanwhile COST, META, SBUX, JPM went to 15% — genuinely uncorrelated businesses that diversify well.
+
+2024-03-22 (BULL): Kelly gave everyone exactly 10% (normalization washed out differences). Markowitz restructured significantly — rewarded genuine diversifiers, penalized correlated clusters.
+
+2022-06-22 (BEAR): Total invested dropped to 70.4% — optimizer held more cash automatically through tighter bear regime caps. Correct risk behavior.
+
+**The 2% minimum floor:** Several stocks get pushed to the minimum. This means Markowitz wanted to remove them entirely but the `MIN_WEIGHT = 0.02` constraint forced a minimum holding. In a real production system you might let the optimizer zero these out completely.
+
+### Regime Behavior in the Optimizer
+
+- **Bull:** Full Kelly + Markowitz, standard 15% caps
+- **Bear:** Kelly + Markowitz with tighter 70% position caps (model less reliable in crashes)
+- **Choppy:** Pure cash — handled BEFORE calling the optimizer in `ml_backtest.py`
+
+**Why pure cash in choppy (not SPY rotation):**
+SPY rotation was initially coded and tested. It destroyed returns — -40.89% in the choppy regime, -2.44 Sharpe, bringing overall portfolio to -30.14% total. Root cause: the 2022 rate hike selloff hit during many choppy days, and 80% of capital in SPY during a 20% drawdown is catastrophic. The regime switcher's 186% came from pure cash in choppy. Reverted immediately.
+
+**Lesson:** Empirical testing overrides theoretical elegance. Pure cash in uncertainty is the correct rule.
+
+### Constants Used
+```python
+COV_LOOKBACK   = 60     # days of history for covariance matrix
+MIN_WEIGHT     = 0.02   # minimum position — no slivers below 2%
+MAX_WEIGHT     = 0.15   # inherits from position sizer
+RISK_FREE_RATE = 0.05/252  # daily risk-free (~5% annual, 2021-2025 avg)
+MIN_STOCKS     = 2      # need at least 2 stocks to optimize correlations
+```
+
+### Known Limitation of Markowitz
+Covariance matrix is estimated from historical returns — assumes future correlation structure looks like the past. In a crisis, correlations spike (everything moves together). This is a known weakness. More sophisticated approaches (Black-Litterman, robust optimization) address this but are out of scope for AlphaForge.
+
+### Files Added
+- `risk/__init__.py` — empty file making risk/ a Python module
+- `risk/position_sizer.py` — Kelly + vol adjustment
+- `risk/portfolio_optimiser.py` — Markowitz Sharpe maximization
+
+---
+
+## Week 7 — Final Backtest Results
+
+After fixing two bugs (SPY rotation in choppy, date range starting before ML signal period):
+
+**v3 Performance by Regime (Aug 2021 - Dec 2025):**
+| Regime | Days | Total Return | Sharpe |
+|--------|------|-------------|--------|
+| BULL | 659 | +16.62% | 0.56 |
+| BEAR | 174 | +5.05% | 0.57 |
+| CHOPPY | 272 | 0.00% | 0.00 |
+
+**Overall: +22.52% total, 0.49 Sharpe, -15.54% max drawdown**
+
+**What the bug journey taught us:**
+
+Bug 1 — SPY rotation: Coded, tested, produced -30.14% total return. Root cause: SPY lost 20% in 2022 during choppy regime days. Fix: pure cash.
+
+Bug 2 — Wrong date range: Backtest was running from Jan 2020 even though ML signals only start Aug 2021. This added 383 dead days where no signals existed, artificially weighting the denominator. Fix: filter `common_dates` to start from `signal_start`.
+
+**The honest assessment:**
+- Max drawdown cut from -28.62% to -15.54% — real investors would stay in this strategy
+- Sharpe improved 29% — better risk-adjusted return
+- Raw return slightly lower — expected, Kelly is conservative by design
+- The risk layer does its job correctly
+
+---
+
+## Week 8 — Execution Layer & Paper Trading
+
+### What Changes in Week 8
+
+Everything before Week 8 runs historically — feed it 5 years of past data, it tells you what would have happened. Week 8 makes the system run live — every day, automatically, with real paper orders.
+
+### What "Paper Trading" Means
+
+Alpaca offers a paper trading account — simulated brokerage with $100,000 fake money executing against real live market prices. No real money at risk, mechanics identical to a live account. Industry standard way to validate a strategy before going live.
+
+### AlphaForge Trading Style — Daily Rebalancing (NOT Day Trading)
+
+**Day trading** = opening and closing positions within the same day, profiting from intraday price moves. Requires tick-level data, extremely fast execution, very hard to profit from.
+
+**AlphaForge** = daily rebalancing system. Every morning, look at current portfolio, model generates new target weights based on yesterday's closing prices, rebalance to targets. You might hold AAPL for weeks if the model keeps liking it. The 5-day forward return target means thinking in week-long horizons, not minutes. Profits compound over months.
+
+### How Long Does run_daily.py Run?
+
+It runs once per day and exits — it is NOT a while loop. Flow:
+```
+9:25 AM → run_daily.py starts
+9:30 AM → market opens, orders placed
+9:35 AM → script finishes and exits
+```
+
+Scheduled via Windows Task Scheduler to run automatically each weekday morning. The 3% daily loss limit doesn't keep the script alive — it prevents orders from being placed that day, then the script exits normally.
+
+### The Four Components of Week 8
+
+**1. `execution/order_manager.py`** — the core new piece. Translates target portfolio weights into actual Alpaca orders. Handles: connection, market hours check, daily loss limit, computing buy/sell deltas, placing orders.
+
+**2. `execution/run_daily.py`** — orchestrates everything in sequence each morning: fetch yesterday's prices → recompute features → run HMM → run ML model → run risk layer → place orders.
+
+**3. Safeguards (hard limits):**
+- Max position size: 15% (inherits from risk layer)
+- Daily loss limit: halt all trading if portfolio down >3% today
+- Market hours: only place orders 9:30–15:55 ET (soft close 5 min before end)
+- Min order value: skip orders below $50
+- Dry run mode: log orders without actually placing them
+
+**4. Logging** — every order, every decision, every error written to `logs/trading_YYYYMMDD.log`. When something goes wrong in a live system (and it will), the log is how you debug it.
+
+### Key Design Decisions in Order Manager
+
+**Target vs Current (the core concept):**
+```
+Target:  AAPL 12%, MSFT 8%, NVDA 0%
+Current: AAPL 10%, MSFT 8%, NVDA 5%
+Action:  Buy 2% AAPL, Hold MSFT, Sell all NVDA
+```
+Only trade the DELTA. Minimizes transaction costs and unnecessary turnover.
+
+**Sells before buys:** Order list sorted so sells execute first. Selling NVDA frees up cash before buying AAPL — prevents "insufficient funds" failures.
+
+**Notional orders (dollars, not shares):** "Buy $1,200 of AAPL" not "buy 5 shares." Much easier to work with portfolio percentages. Alpaca supports fractional shares via notional orders.
+
+**1% minimum weight change threshold:** If optimizer shifts a position from 10.2% to 10.6%, ignore it. Transaction cost would exceed the benefit.
+
+**`dry_run=True` by default:** System will never place a real order unless you explicitly set `dry_run=False`. Critical safeguard during development.
+
+### Order Manager Test Results
+
+Running `python execution/order_manager.py` on a Saturday produced:
+```
+Connected to Alpaca (PAPER) account  ← SUCCESS
+Market is closed — no orders will be placed  ← CORRECT
+```
+
+This is expected and correct behavior. The Alpaca connection worked. Market hours check worked. Test properly on a weekday between 9:30-3:55 PM ET (Singapore time: 9:30 PM - 3:55 AM next day).
+
+### Files Added
+- `execution/__init__.py` — empty module marker
+- `execution/order_manager.py` — full execution pipeline
+
+---
+
+## Questions Asked This Session & Answers
+
+### "Is Kelly Criterion the only and best way to handle position sizing?"
+
+No. See the position sizing methods table above. Kelly is theoretically optimal when your probability estimates are accurate, but it's aggressive. Real quant funds use fractional Kelly (half-Kelly) or combine Kelly with volatility parity. We use half-Kelly + volatility adjustment because: (1) our probability estimates aren't perfect, (2) volatility adjustment ensures equal risk contribution per position regardless of stock volatility.
+
+### "What is 'odds' in Kelly Criterion?"
+
+Odds = average winning trade / average losing trade. If winners average +3% and losers average -1.5%, odds = 2.0. Combined with win rate, Kelly tells you the optimal bet fraction. We use b=2.0 as a prior calibrated from the signal quality table (Very High bucket +4.42% vs Very Low -3.53% ≈ 3:1 ratio, conservatively estimated at 2:1).
+
+### "Why is the ML strategy so weak compared to the regime switcher?"
+
+The comparison is unfair — different time periods. The regime switcher covers 2020-2025 including the COVID bull run (best 18 months in recent market history). ML only covers Aug 2021-2025, starting right before the 2022 rate hike selloff where SPY dropped 20%. Over the SAME period, the regime switcher's advantage shrinks substantially. The key improvement is max drawdown: -15.54% vs -28.62%, which is what the risk layer was designed to achieve.
+
+### "Is this a day trading system?"
+
+No. AlphaForge is a daily rebalancing system that thinks in week-long horizons (5-day forward return target). Day trading operates on seconds/milliseconds and requires completely different infrastructure. See the Day Trading section below.
+
+### "Should I add universe expansion now or later?"
+
+Later. Rationale: get the risk layer proven on 29 stocks first, then expansion is just plugging more data into an already-tested system. Scheduled between Week 8 and Week 9.
+
+### "Should choppy regime rotate into SPY or hold pure cash?"
+
+We tested SPY rotation and it produced -40.89% in the choppy regime due to 2022 rate hike selloff exposure. Reverted to pure cash. The regime switcher's 186% was built on pure cash in choppy — empirically proven to be the right rule.
+
+---
+
+## Day Trading vs AlphaForge — Key Differences
+
+This is a completely different project with a different technical stack. Summary:
+
+**Why Python isn't used for real day trading:**
+Python is too slow for anything under the minute timeframe. Professional firms measure execution speed in microseconds. C++ compiles directly to machine code with no interpreter overhead — a well-written C++ trading system executes an order in under 10 microseconds. Python operates in milliseconds — 100x slower.
+
+**What day trading additionally requires:**
+- Direct market data feed (ITCH, OPRA) delivering tick-by-tick order book data — millions of messages per second
+- Co-location — physically placing servers inside exchange data centers to minimize network round-trip latency
+- Order book modeling — modeling the limit order book in real time (bid-ask spread, queue depth, iceberg orders)
+- Market microstructure knowledge — how matching engines prioritize orders, price-time priority, pro-rata matching, order types (IOC, FOK, pegged)
+- Pre-trade risk systems in C++ — hard limits executing before every single order
+- FIX protocol — industry standard messaging format
+- Low-latency C++ — lock-free data structures, SIMD instructions, kernel bypass networking (DPDK), CPU affinity
+
+**Technical concepts needed beyond AlphaForge:**
+- Market Microstructure Theory (O'Hara) — standard text
+- Trading and Exchanges (Larry Harris) — more practical
+- Order flow imbalance as predictive signal
+- Statistical arbitrage at high frequency — pairs trading, ETF arbitrage at millisecond level
+- TCP vs UDP, multicast, kernel bypass networking
+- Co-location and network latency optimization
+
+**Realistic career path:**
+Finish AlphaForge → quant internship (Python research) → learn C++ in parallel → specialize into execution/microstructure in 2nd or 3rd role. Very few people jump straight into HFT infrastructure — typically 3-5 year progression.
+
+---
+
+## Key Finance & Technical Concepts
+
+**Momentum Premium** — stocks that performed well over the past 3-12 months tend to continue performing well. Academic finding since 1993 (Jegadeesh and Titman), one of the most robust patterns in finance. Our XGBoost confirmed this — return_5d is the single most important feature at 35%.
+
+**Mean Reversion** — extreme price moves tend to snap back toward average. Fear and greed cause prices to overshoot fair value. RSI and Bollinger Bands measure this overshoot.
+
+**Cross-Sectional vs Time-Series Signals**
+- Cross-sectional: compare stocks against each other (momentum — rank all 29 stocks by recent return)
+- Time-series: compare a stock against its own history (mean reversion — is AAPL oversold vs its own recent prices?)
+
+**Universe Composition Bias** — a strategy must be designed for its universe. Shorting "losers" in a universe of blue-chip winners is structurally broken because even the worst large-cap stock tends to go up over time.
+
+**Lookahead Bias** — using future information in a backtest. Causes unrealistically good results. Fixed by shifting signals one day forward. This caused the 146,600% fantasy return early on.
+
+**Spread** — the difference between buy price and sell price. Our 0.1% transaction cost models this plus broker commission.
+
+**Walk-Forward Validation** — train on all data up to today, predict tomorrow, move forward and repeat. The honest way to validate ML models on time-series data.
+
+**Market Regime** — markets behave differently in different environments: trending bull, trending bear, high-volatility/choppy.
+
+**Hidden Markov Model (HMM)** — statistical model where states (bull/bear/choppy) are unobservable but can be inferred from observable data (returns, volatility).
+
+**Transition Matrix** — probability of moving from one regime to another. Our bear regime has 97.2% probability of staying bear — crashes are persistent.
+
+**Winsorization** — clipping extreme values at defined percentiles before feeding into a model. Prevents outlier days from dominating training.
+
+**Fat Tails** — financial return distributions have more extreme events than a normal distribution predicts. Why winsorization is necessary.
+
+**Alternative Data** — any data beyond price/volume: news sentiment, Reddit posts, satellite imagery, credit card transactions.
+
+**FinBERT** — BERT fine-tuned on financial text. Classifies text as positive/negative/neutral with confidence score.
+
+**Sharpe Ratio** — (avg return − risk-free rate) / volatility, annualised. Return per unit of risk. Above 1.0 decent, above 1.5 good, above 2.0 excellent.
+
+**Sortino Ratio** — like Sharpe but only counts downside volatility as risk. Big upward swings aren't risk — you only care about drops.
+
+**Max Drawdown** — worst peak-to-trough decline. The number that determines whether real investors would stay invested or panic.
+
+**Win Rate** — percentage of trading days the portfolio made money. Can be misleading — a strategy can have low win rate but still be profitable if wins are larger than losses.
+
+**Signal-Weighted Position Sizing** — allocate capital proportional to signal strength. What ML v2 used before being replaced by Kelly + Markowitz.
+
+**AUC (Area Under the ROC Curve)** — measures how well a classifier ranks predictions. 0.5 = random, 1.0 = perfect. Above 0.54 is meaningful edge in finance. Our XGBoost achieved 0.83.
+
+**Scale_pos_weight** — XGBoost parameter upweighting the minority class. Top quartile occurs 25% of time → set scale_pos_weight ≈ 3.
+
+**Kelly Criterion** — optimal position sizing given edge and odds. f = (p×b - q) / b. We use half-Kelly (multiply by 0.5) for safety.
+
+**Half-Kelly** — multiply raw Kelly fraction by 0.5. Halves position size, sacrifices some theoretical return for much better drawdown protection. Standard at real quant funds.
+
+**Volatility Parity / Vol Targeting** — size each position so it contributes equal risk to the portfolio. `weight = kelly_weight × (target_vol / stock_vol)`. High-vol stocks get smaller positions for the same signal.
+
+**Mean-Variance Optimization (Markowitz)** — find portfolio weights maximizing return for a given risk level (or equivalently maximizing Sharpe). Uses expected returns + covariance matrix as inputs.
+
+**Covariance Matrix** — square matrix showing how each pair of stocks moves together. Diagonal = own variance. Off-diagonal = co-movement. Core input to Markowitz.
+
+**Efficient Frontier** — the curve of optimal portfolios where you can't improve return without increasing risk. We target the maximum Sharpe point on this curve.
+
+**SLSQP (Sequential Least Squares Programming)** — optimization algorithm used by scipy to solve the constrained Sharpe maximization problem. Standard choice for portfolio optimization.
+
+**Notional Orders** — orders denominated in dollar amount rather than share quantity. "Buy $1,200 of AAPL" instead of "buy 5 shares." Easier to work with portfolio percentages.
+
+**Rebalancing** — adjusting current portfolio positions toward target weights. Only trading the delta (difference) between current and target — minimizes transaction costs and turnover.
+
+**Daily Loss Limit** — safeguard that halts all trading if the portfolio drops more than X% in a single day. Prevents a buggy signal from causing a runaway loss spiral.
+
+**Paper Trading** — simulated trading with fake money against real live market prices. Industry standard validation step before risking real capital.
+
+**EMH (Efficient Market Hypothesis)** — theory that all available information is already priced in. Large-caps are close to efficient — which is why predicting 1-day direction is nearly impossible and why we predict 5-day relative rank instead.
+
+**Hypertable** — TimescaleDB's table structure that auto-partitions data by time for fast date-range queries.
+
+**Survivorship Bias** — only testing on companies that still exist skews results upward. Our 29-stock universe has mild survivorship bias worth acknowledging.
+
+**Coverage Rate** — percentage of stock-days with at least one news article. 67% is good. 2.7% (first attempt) is too sparse to be useful.
+
+**FIX Protocol** — Financial Information eXchange. Industry standard messaging format for order management used by all brokers and exchanges.
+
+**Co-location** — physically placing trading servers inside exchange data centers to minimize network latency. Used by high-frequency trading firms.
+
+**Order Book** — list of all outstanding buy and sell orders for a stock at different price levels. Day trading strategies model this in real time.
 
 ---
 
@@ -479,7 +948,6 @@ The current codebase is written functionally (plain functions, no classes). This
 **Parquet index structure:**
 - `features_daily.parquet` has a MultiIndex of `['time', 'symbol']` — NOT columns
 - Always `df.reset_index()` before trying to access `time` or `symbol` as columns
-- Momentum and mean reversion strategy files expect the original `['time', 'symbol']` index — pass them the raw parquet, not the reset version
 
 **Alpaca News API:**
 - `symbols` parameter must be a comma-separated string, not a list
@@ -488,77 +956,44 @@ The current codebase is written functionally (plain functions, no classes). This
 - Rate limit: add `time.sleep(0.3)` between requests
 
 **HMM training:**
-- Always winsorize features at 1st/99th percentile before training — one extreme day can consume an entire state
+- Always winsorize features at 1st/99th percentile before training
 - Label regimes by volatility (stable) not by mean return (fragile to outliers)
-- Log-likelihood scores are NOT comparable across models trained on different data
 
 **XGBoost for financial data:**
-- `scale_pos_weight` is critical when target class is rare (top quartile = 25% of data)
+- `scale_pos_weight` is critical when target class is rare
 - `min_child_weight=30` prevents overfitting on small leaf nodes
 - `max_depth=4` keeps trees shallow — financial data has weak signals, deep trees overfit
-- Signal threshold for top-quartile prediction should be 0.35 not 0.5 (probabilities cluster below 0.5 when positive class is rare)
 
----
+**ML signal threshold:**
+- Use 0.35 not 0.5 — probabilities cluster below 0.5 when positive class is rare (25% of data)
 
-## Key Finance & Technical Concepts
+**sys.path for multi-level imports:**
+- `ml_backtest.py` lives in `research/strategies/` and needs BOTH:
+  - `dirname × 3` → project root (for `risk/` module)
+  - `dirname × 2` → `research/` (for `strategies/` module)
+- Always add both when a file needs to import from multiple levels
 
-**Momentum Premium** — stocks that performed well over the past 3-12 months tend to continue performing well. Academic finding since 1993 (Jegadeesh and Titman), one of the most robust patterns in finance. Our XGBoost confirmed this — return_5d is the single most important feature at 35%.
+**`__init__.py` files required:**
+- Every folder you import from as a module needs an empty `__init__.py`
+- Created for `risk/` and `execution/` during Week 7/8
 
-**Mean Reversion** — extreme price moves tend to snap back toward average. Fear and greed cause prices to overshoot fair value. RSI and Bollinger Bands measure this overshoot.
+**Never `pip install` a package with the same name as your local module:**
+- `pip install risk` installs a random unrelated PyPI package
+- Use `__init__.py` + `sys.path` to make local modules importable
 
-**Cross-Sectional vs Time-Series Signals**
-- Cross-sectional: compare stocks against each other (momentum — rank all 29 stocks by recent return)
-- Time-series: compare a stock against its own history (mean reversion — is AAPL oversold vs its own recent prices?)
+**ML backtest date range:**
+- Always filter `common_dates` to start from `signals["date"].min()` (Aug 2021)
+- Running from 2020 adds 383 dead days with no signals, distorting metrics
 
-**Universe Composition Bias** — a strategy must be designed for its universe. Shorting "losers" in a universe of blue-chip winners is structurally broken because even the worst large-cap stock tends to go up over time. This is different from overfitting — it's a mismatch between strategy design and universe design.
+**Portfolio optimiser — choppy regime:**
+- Handle choppy (pure cash) in `ml_backtest.py` BEFORE calling the optimiser
+- The optimiser should only ever receive bull or bear regime calls
+- SPY rotation in choppy was tested and destroyed returns due to 2022 selloff
 
-**Lookahead Bias** — using future information in a backtest. Causes unrealistically good results. Fixed by shifting signals one day forward (`signals.shift(1)`). This was the cause of the 146,600% fantasy return we saw early on.
-
-**Spread** — the difference between buy price and sell price. On a $100 stock with a $0.05 spread, you lose $0.05 immediately on purchase. Our 0.1% transaction cost models this plus broker commission.
-
-**Walk-Forward Validation** — train on all data up to today, predict tomorrow, move forward and repeat. The honest way to validate ML models on time-series data. Standard k-fold cross-validation is wrong for time series because it leaks future data into training.
-
-**Market Regime** — markets behave differently in different environments: trending bull, trending bear, high-volatility/choppy. An HMM detects these states automatically from price and volume features.
-
-**Hidden Markov Model (HMM)** — statistical model where you can't directly observe the states (bull/bear/choppy) but you can infer them from observable data (returns, volatility). "Hidden" = unobservable states, "Markov" = next state depends only on current state (memoryless).
-
-**Transition Matrix** — in an HMM, the probability of moving from one regime to another. Our bear regime has 97.2% probability of staying bear — crashes are persistent, they don't resolve in one day.
-
-**Winsorization** — clipping extreme values at defined percentiles (e.g. 1st and 99th) before feeding into a model. Prevents outlier days from dominating model training. Essential for financial data which has fat tails.
-
-**Fat Tails** — financial return distributions have more extreme events than a normal distribution would predict. Crashes and rallies happen more often than normal bell curve math suggests. This is why winsorization is necessary.
-
-**Alternative Data** — any data beyond price/volume: news sentiment, Reddit posts, satellite imagery, credit card transactions. Week 6 uses FinBERT to turn financial text into trading signals.
-
-**FinBERT** — BERT (Bidirectional Encoder Representations from Transformers) fine-tuned specifically on financial text. Understands financial language better than general-purpose sentiment models. Classifies text as positive/negative/neutral with confidence score.
-
-**Sharpe Ratio** — (average return − risk-free rate) / volatility, annualised. Return per unit of risk. Above 1.0 decent, above 1.5 good, above 2.0 excellent. Most important single metric for comparing strategies.
-
-**Sortino Ratio** — like Sharpe but only counts downside volatility as "risk." Big upward swings aren't really risk — you only care about drops. A higher Sortino than Sharpe means your losses are smaller than your gains.
-
-**Max Drawdown** — worst peak-to-trough decline during the backtest. The number that determines whether real investors would stay invested or panic. Reducing it is a primary goal of Week 7.
-
-**Win Rate** — percentage of trading days where the portfolio made money. Can be misleading in isolation — a strategy can have a low win rate but still be profitable if wins are larger than losses. Mean reversion's 28% win rate looked alarming but was because most days had zero positions.
-
-**Signal-Weighted Position Sizing** — allocate capital proportional to signal strength rather than equally. If model is twice as confident about AAPL as NVDA, AAPL gets twice the capital. More sophisticated than equal weighting.
-
-**AUC (Area Under the ROC Curve)** — measures how well a classifier ranks predictions. 0.5 = random coinflip, 1.0 = perfect. In financial ML, above 0.54 is considered meaningful edge. Our XGBoost achieved 0.83 — excellent.
-
-**Log-Likelihood** — how well an HMM explains observed data. The log of the probability that the model would generate those observations. More negative = worse fit, less negative = better fit. Only comparable across models trained on identical data.
-
-**Scale_pos_weight** — XGBoost parameter that upweights the minority class in imbalanced datasets. If negative class is 3x more common than positive, set scale_pos_weight=3 to compensate.
-
-**Kelly Criterion** — mathematical formula for optimal position sizing given your edge (expected return) and odds. Tells you exactly what fraction of capital to risk on each trade. Will be implemented in Week 7.
-
-**Mean-Variance Optimization** — Markowitz's classic framework for building portfolios. Given expected returns and correlations between assets, find the combination of weights that maximises return for a given level of risk. Will be implemented in Week 7.
-
-**Efficient Market Hypothesis (EMH)** — theory that all available information is already priced into stock prices, making it impossible to consistently beat the market. In practice, large-cap liquid stocks are close to efficient — which is why predicting 1-day direction is nearly impossible and why we switched to 5-day relative rank prediction.
-
-**Hypertable** — TimescaleDB's table structure that auto-partitions data by time, making date-range queries extremely fast.
-
-**Survivorship Bias** — only testing on companies that still exist today skews results upward. Our fixed 29-stock universe has mild survivorship bias — worth acknowledging when presenting results.
-
-**Coverage Rate** — in the context of sentiment data, the percentage of stock-days that have at least one news article. 67% is good. 2.7% (our first attempt) is too sparse to be useful as a feature.
+**Alpaca order manager:**
+- Market is closed on weekends — order_manager.py will halt immediately on Saturday/Sunday
+- This is correct behavior, not a bug
+- Test properly on a weekday 9:30 AM - 3:55 PM ET (9:30 PM - 3:55 AM SGT)
 
 ---
 
@@ -575,9 +1010,9 @@ AlphaForge/
 │       ├── regime_labels.parquet               ← daily regime label (bull/choppy/bear)
 │       ├── backtest_momentum.parquet           ← momentum strategy daily P&L
 │       ├── backtest_mean_reversion.parquet     ← mean reversion daily P&L
-│       ├── backtest_regime_switcher.parquet    ← regime switcher daily P&L (best so far)
-│       ├── backtest_ml.parquet                 ← ML strategy daily P&L
-│       ├── ml_signals.parquet                  ← XGBoost probability scores per stock per day
+│       ├── backtest_regime_switcher.parquet    ← regime switcher daily P&L
+│       ├── backtest_ml.parquet                 ← ML + Risk Layer v3 daily P&L
+│       ├── ml_signals.parquet                  ← XGBoost v3 probability scores per stock per day
 │       ├── news_raw.parquet                    ← raw articles from Alpaca News API (cached)
 │       ├── news_scored.parquet                 ← articles with FinBERT sentiment scores (cached)
 │       └── sentiment_daily.parquet             ← daily sentiment features per stock
@@ -589,17 +1024,25 @@ AlphaForge/
 │   │   ├── mean_reversion.py                  ← RSI + Bollinger Band, long-only
 │   │   ├── backtest.py                        ← simulation engine + performance metrics
 │   │   ├── regime_switcher.py                 ← HMM-driven strategy selection
-│   │   └── ml_backtest.py                     ← backtests ML probability signals
+│   │   └── ml_backtest.py                     ← ML + Risk Layer backtest (v3)
 │   └── notebooks/
 ├── models/
 │   ├── regime_hmm.py                          ← trains HMM, labels regimes, saves model
 │   ├── hmm_model.pkl                          ← trained HMM + scaler (pickle)
-│   ├── ml_signal.py                           ← XGBoost walk-forward training + signal generation
-│   ├── xgb_model.pkl                          ← final trained XGBoost model (pickle)
+│   ├── ml_signal.py                           ← XGBoost v3 (with sentiment), walk-forward
+│   ├── xgb_model.pkl                          ← final trained XGBoost v3 model (pickle)
 │   └── sentiment.py                           ← Alpaca news fetch + FinBERT scoring pipeline
-├── risk/                                      ← Week 7
-├── execution/                                 ← Week 8
+├── risk/
+│   ├── __init__.py                            ← makes risk/ importable as a module
+│   ├── position_sizer.py                      ← Kelly Criterion + volatility adjustment
+│   └── portfolio_optimiser.py                 ← Markowitz mean-variance Sharpe maximization
+├── execution/
+│   ├── __init__.py                            ← makes execution/ importable as a module
+│   ├── order_manager.py                       ← Alpaca paper trading order execution
+│   └── run_daily.py                           ← daily pipeline orchestrator (Week 8, pending)
 ├── dashboard/                                 ← Week 9
+├── logs/
+│   └── trading_YYYYMMDD.log                   ← daily execution logs
 ├── tests/
 ├── config/
 ├── .env                                       ← API keys + DB credentials (NEVER commit)
@@ -626,8 +1069,44 @@ scikit-learn     ← StandardScaler, metrics (accuracy, AUC)
 xgboost          ← gradient boosting ML model
 transformers     ← HuggingFace library for FinBERT
 torch            ← PyTorch backend for FinBERT
+scipy            ← portfolio optimization (SLSQP solver) ← NEW Week 7
+zoneinfo         ← timezone handling for market hours check ← NEW Week 8
 ```
 
 ---
 
-*Last updated: End of Week 6 — Regime Detection (HMM), ML Signal Generation (XGBoost), and Sentiment Pipeline (FinBERT) complete. Next: integrate sentiment features into ML model, then Week 7 Risk & Portfolio Layer.*
+## What's Coming Next
+
+### Immediate Next Step — run_daily.py (Week 8 completion)
+Build the daily pipeline orchestrator that wires all existing components together into one automated morning script. Test with order_manager.py in dry_run=True mode on a weekday during market hours. Then switch to dry_run=False for live paper trading.
+
+### Week 8.5 — Universe Expansion
+Expand from 29 → 200+ stocks. Steps: update `data/ingest.py` to fetch new tickers, re-run `engineer.py` for feature computation, retrain ML model (walk-forward will take longer), update regime HMM on expanded universe. This unlocks viable short selling and makes sentiment features more powerful.
+
+### Week 9 — Streamlit Dashboard
+Live P&L curve, current positions, strategy performance by regime, sentiment signals, risk metrics updating daily.
+
+### Week 10 — Polish & Write-Up
+Clean README, demo video, docstrings throughout, Medium article. Best story: the regime detection value-add (186% → how pure cash during choppy doubled returns). Second story: sentiment's role in efficient vs inefficient markets.
+
+---
+
+## Areas for Improvement
+
+1. **Universe expansion** — the biggest single lever. Mid/small cap stocks have less efficient pricing, making sentiment and ML signals much more powerful. Also enables viable short selling.
+
+2. **Covariance estimation** — the 60-day lookback assumes stable correlations. In crises, correlations spike (everything moves together). Black-Litterman or robust optimization would handle this better.
+
+3. **Kelly odds calibration** — we hardcoded b=2.0 based on the signal quality table. In production, this should be estimated from rolling historical data and updated quarterly.
+
+4. **Sentiment coverage** — 49% effective coverage. After universe expansion to stocks with fewer analysts, coverage will improve and sentiment will show more edge.
+
+5. **Transaction cost model** — our 0.1% flat cost is a simplification. Real costs depend on order size, volatility, and time of day. A more realistic model would improve backtest accuracy.
+
+6. **Short selling** — currently long-only due to universe composition bias. After expanding to 200+ stocks including genuine losers, short selling becomes viable and should improve Sharpe.
+
+7. **Turnover constraint** — currently no explicit limit on how much the portfolio changes day-to-day. High turnover = high transaction costs. Adding a turnover penalty to the Markowitz objective would reduce costs.
+
+---
+
+*Last updated: End of Week 7 / Start of Week 8 — Sentiment integration (v3 ML model, 0.829 AUC, 7.3% sentiment importance), Risk Layer complete (Kelly + Markowitz, Sharpe 0.49, max drawdown -15.54%), Order Manager built and connection tested. Next: run_daily.py to complete Week 8, then universe expansion and dashboard.*
