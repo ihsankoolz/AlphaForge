@@ -292,6 +292,185 @@ def predictions_to_signals(predictions_df):
     df.loc[buy_mask, "signal"] = (df.loc[buy_mask, "pred_proba"] - 0.35) / 0.65
     return df
 
+# ── 8. LIVE INFERENCE — generate_signals() ───────────────────────────────────
+#
+# Add this function to models/ml_signal.py.
+# Called by execution/run_daily.py each morning after regime detection.
+#
+# Also update run_daily.py's call in run_ml_signals() to pass regime:
+#
+#     signals_df = generate_signals(
+#         features_df=features_df,
+#         sentiment_df=sentiment_df,
+#         model_path=model_path,
+#         regime=regime,           # ← add this
+#     )
+#
+# And update run_ml_signals()'s signature to accept + forward regime:
+#
+#     def run_ml_signals(features_df, sentiment_df, logger, regime="bull"):
+#         ...
+#         signals_df = generate_signals(..., regime=regime)
+#
+# And update the call in run_pipeline():
+#
+#     signals_df = run_ml_signals(features_df, sentiment_df, logger, regime=regime)
+
+def generate_signals(
+    features_df:  pd.DataFrame,
+    sentiment_df: pd.DataFrame | None,
+    model_path:   str = "models/xgb_model.pkl",
+    regime:       str = "bull",
+) -> pd.DataFrame:
+    """
+    Generate XGBoost v3 pred_proba scores for every symbol for today.
+
+    Replicates the exact feature construction from load_data() so the
+    live feature vector matches what the model was trained on.
+
+    Args:
+        features_df:  Flat DataFrame [time, symbol, ...22 features...]
+                      Already reset_index'd and tz-naive (from run_daily.py).
+                      Must contain FULL history — rule-based signals need
+                      cross-sectional ranking across all dates to be valid.
+        sentiment_df: DataFrame [date, symbol, sentiment_mean, ...] or None.
+                      If None, sentiment features are filled with 0 (neutral).
+        model_path:   Path to xgb_model.pkl saved by walk_forward_validation().
+        regime:       Today's regime from predict_regime() — 'bull', 'choppy',
+                      or 'bear'. Used to construct regime_encoded feature.
+
+    Returns:
+        DataFrame with columns [symbol, pred_proba], one row per symbol,
+        sorted descending by pred_proba.
+    """
+    # ── Load model artefacts ─────────────────────────────────────────────────
+    with open(model_path, "rb") as f:
+        bundle = pickle.load(f)
+
+    model        = bundle["model"]         # trained XGBClassifier (final fold)
+    feature_cols = bundle["feature_cols"]  # exact columns used during training
+
+    # ── Normalise time column ─────────────────────────────────────────────────
+    # features_df arrives from run_daily.py already tz-normalised, but be
+    # defensive — downstream merges silently fail on tz mismatch.
+    df = features_df.copy()
+    df["date"] = pd.to_datetime(df["time"]).dt.normalize()
+    if df["date"].dt.tz is not None:
+        df["date"] = df["date"].dt.tz_localize(None)
+
+    # ── Rule-based signals ────────────────────────────────────────────────────
+    # momentum_signals() and mr_signals() require the FULL feature history
+    # to compute cross-sectional ranks across all 29 stocks.
+    # We cannot pass just today's row — the rank would be meaningless.
+    #
+    # These functions expect a DataFrame with MultiIndex [time, symbol].
+    # We reconstruct it from the flat features_df by setting the index back.
+    print("  Computing rule-based signals on full history...")
+    try:
+        features_indexed = df.set_index(["time", "symbol"])
+
+        mom_sig = momentum_signals(features_indexed).reset_index()
+        mr_sig  = mr_signals(features_indexed).reset_index()
+
+        # Normalise date columns in signal outputs
+        for sig_df in [mom_sig, mr_sig]:
+            sig_df["date"] = pd.to_datetime(sig_df["date"]).dt.normalize()
+            if sig_df["date"].dt.tz is not None:
+                sig_df["date"] = sig_df["date"].dt.tz_localize(None)
+
+        mom_sig = mom_sig[["date", "symbol", "signal"]].rename(
+            columns={"signal": "momentum_signal"}
+        )
+        mr_sig  = mr_sig[["date", "symbol", "signal"]].rename(
+            columns={"signal": "mr_signal"}
+        )
+
+        df = df.merge(mom_sig, on=["date", "symbol"], how="left")
+        df = df.merge(mr_sig,  on=["date", "symbol"], how="left")
+
+    except Exception as e:
+        print(f"  Warning: rule-based signals failed ({e}) — filling with 0")
+        df["momentum_signal"] = 0.0
+        df["mr_signal"]       = 0.0
+
+    df["momentum_signal"] = df["momentum_signal"].fillna(0)
+    df["mr_signal"]       = df["mr_signal"].fillna(0)
+
+    # ── Regime encoding ───────────────────────────────────────────────────────
+    # Must use the same mapping as training: bull=0, choppy=1, bear=2
+    regime_map = {"bull": 0, "choppy": 1, "bear": 2}
+    df["regime_encoded"] = regime_map.get(regime.lower(), 0)
+
+    # ── Sentiment features ────────────────────────────────────────────────────
+    sentiment_feature_cols = [
+        "sentiment_mean", "sentiment_std",
+        "sentiment_pos_pct", "sentiment_neg_pct",
+        "article_count", "sentiment_3d",
+    ]
+
+    if sentiment_df is not None:
+        sent = sentiment_df.copy()
+        # Normalise sentiment date column
+        date_col = "date" if "date" in sent.columns else sent.columns[0]
+        sent[date_col] = pd.to_datetime(sent[date_col]).dt.normalize()
+        if sent[date_col].dt.tz is not None:
+            sent[date_col] = sent[date_col].dt.tz_localize(None)
+        sent = sent.rename(columns={date_col: "date"})
+
+        available_sent_cols = [c for c in sentiment_feature_cols if c in sent.columns]
+        sent = sent[["date", "symbol"] + available_sent_cols]
+        df   = df.merge(sent, on=["date", "symbol"], how="left")
+
+    # Fill any missing sentiment with neutral (same as training)
+    sentiment_fills = {
+        "sentiment_mean":    0.0,
+        "sentiment_std":     0.0,
+        "sentiment_pos_pct": 0.0,
+        "sentiment_neg_pct": 0.0,
+        "article_count":     0.0,
+        "sentiment_3d":      0.0,
+    }
+    for col, fill_val in sentiment_fills.items():
+        if col not in df.columns:
+            df[col] = fill_val
+        else:
+            df[col] = df[col].fillna(fill_val)
+
+    # ── Filter to the latest available date ───────────────────────────────────
+    # Run the full feature pipeline on all history (required for cross-sectional
+    # signals), then predict only on the most recent date's rows.
+    latest_date = df["date"].max()
+    today = df[df["date"] == latest_date].copy()
+
+    if len(today) == 0:
+        raise ValueError(f"No rows found for latest date {latest_date}")
+
+    print(f"  Predicting on {latest_date.date()} — {len(today)} symbols")
+
+    # ── Build feature matrix ──────────────────────────────────────────────────
+    # Use only the columns the saved model was trained on (feature_cols from pkl).
+    # This guards against column order differences and any extra columns
+    # that might have been added since training.
+    missing_cols = [c for c in feature_cols if c not in today.columns]
+    if missing_cols:
+        print(f"  Warning: {len(missing_cols)} feature(s) missing, filling with 0: {missing_cols}")
+        for col in missing_cols:
+            today[col] = 0.0
+
+    X = today[feature_cols].fillna(0)
+
+    # ── Predict ───────────────────────────────────────────────────────────────
+    pred_proba = model.predict_proba(X)[:, 1]
+
+    result = today[["symbol"]].copy()
+    result["pred_proba"] = pred_proba
+    result = result.sort_values("pred_proba", ascending=False).reset_index(drop=True)
+
+    above_threshold = (result["pred_proba"] >= 0.35).sum()
+    print(f"  Scored {len(result)} symbols — {above_threshold} above 0.35 threshold")
+
+    return result
+
 # ── 7. MAIN ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

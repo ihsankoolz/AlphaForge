@@ -224,6 +224,126 @@ def aggregate_daily_sentiment(scored_df, symbols, all_dates):
     return full
 
 
+def run_sentiment_pipeline(
+    symbols:    list,
+    start_date,
+    end_date,
+) -> pd.DataFrame:
+    """
+    Live inference wrapper called by execution/run_daily.py each morning.
+
+    Fetches only NEW articles (start_date → end_date), scores only those
+    with FinBERT, appends to the existing scored cache, then recomputes
+    and overwrites sentiment_daily.parquet.
+
+    Why incremental?
+      FinBERT takes ~2-3 minutes on the full 2020-2025 history.
+      Each morning we only have ~7 days of new articles (~50-200 total).
+      Scoring those takes <10 seconds. Appending keeps the pipeline fast.
+    """
+    # ── Normalise date args ───────────────────────────────────────────────────
+    start_str = start_date.strftime("%Y-%m-%d") if hasattr(start_date, "strftime") else str(start_date)
+    end_str   = end_date.strftime("%Y-%m-%d")   if hasattr(end_date,   "strftime") else str(end_date)
+
+    print(f"  Sentiment pipeline: {start_str} → {end_str} for {len(symbols)} symbols")
+
+    scored_cache = "data/processed/news_scored.parquet"
+
+    # ── Load existing scored cache ────────────────────────────────────────────
+    if os.path.exists(scored_cache):
+        existing_scored = pd.read_parquet(scored_cache)
+        existing_scored["date"] = pd.to_datetime(existing_scored["date"]).dt.normalize().dt.tz_localize(None)
+        print(f"  Loaded {len(existing_scored):,} existing scored articles")
+        # Determine the actual fetch window — only fetch what we don't have yet
+        latest_cached = existing_scored["date"].max()
+        # Start from day after latest cached, not from start_date
+        # (start_date from run_daily is just a safety window, not a hard start)
+        fetch_from = (latest_cached + timedelta(days=1)).strftime("%Y-%m-%d")
+        print(f"  Cache covers up to {latest_cached.date()} — fetching from {fetch_from}")
+    else:
+        existing_scored = pd.DataFrame()
+        fetch_from      = start_str
+        print(f"  No cache found — fetching from {fetch_from}")
+
+    # ── Fetch new articles ────────────────────────────────────────────────────
+    # Check if there's actually a gap to fill
+    fetch_from_dt = datetime.strptime(fetch_from, "%Y-%m-%d")
+    end_dt        = datetime.strptime(end_str,    "%Y-%m-%d")
+
+    new_scored = pd.DataFrame()
+
+    if fetch_from_dt <= end_dt:
+        print(f"  Fetching new articles: {fetch_from} → {end_str}")
+        new_raw = fetch_news_alpaca(symbols, start_date=fetch_from, end_date=end_str)
+
+        if new_raw.empty:
+            print("  No new articles found")
+        else:
+            # Expand by symbol
+            new_expanded = expand_by_symbol(new_raw, symbols)
+            print(f"  {len(new_expanded):,} new (symbol, article) pairs")
+
+            if not new_expanded.empty:
+                # Deduplicate against existing cache by (date, symbol, headline)
+                if not existing_scored.empty:
+                    existing_keys = set(
+                        zip(existing_scored["date"].astype(str),
+                            existing_scored["symbol"],
+                            existing_scored["headline"])
+                    )
+                    mask = ~new_expanded.apply(
+                        lambda r: (str(r["date"]), r["symbol"], r["headline"]) in existing_keys,
+                        axis=1
+                    )
+                    new_expanded = new_expanded[mask]
+                    print(f"  {len(new_expanded):,} genuinely new articles after dedup")
+
+                if not new_expanded.empty:
+                    # Score with FinBERT
+                    print(f"  Scoring {len(new_expanded):,} articles with FinBERT...")
+                    finbert = load_finbert()
+                    scores  = score_sentiment(new_expanded["text"].tolist(), finbert)
+
+                    new_scored = new_expanded.copy()
+                    new_scored["label"]           = [s["label"]           for s in scores]
+                    new_scored["confidence"]      = [s["confidence"]      for s in scores]
+                    new_scored["sentiment_score"] = [s["sentiment_score"] for s in scores]
+                    print(f"  Scored {len(new_scored):,} new articles")
+    else:
+        print(f"  Cache already up to date — no new articles to fetch")
+
+    # ── Merge new into existing cache and save ────────────────────────────────
+    if not new_scored.empty:
+        combined = pd.concat([existing_scored, new_scored], ignore_index=True)
+        combined["date"] = pd.to_datetime(combined["date"]).dt.normalize().dt.tz_localize(None)
+        combined.to_parquet(scored_cache, index=False)
+        print(f"  Updated cache: {len(combined):,} total scored articles")
+    else:
+        combined = existing_scored
+
+    if combined.empty:
+        raise ValueError("No scored articles available — cannot compute sentiment")
+
+    # ── Recompute daily sentiment over full history ───────────────────────────
+    # Always recompute from the full scored cache so that sentiment_3d
+    # rolling windows are correct at the edges of the new data.
+    print("  Aggregating to daily sentiment features...")
+    features  = pd.read_parquet("data/processed/features_daily.parquet")
+    features  = features.reset_index()
+    all_dates = pd.to_datetime(features["time"]).dt.normalize().dt.tz_localize(None).unique()
+    all_dates = sorted(all_dates)
+
+    daily_sentiment = aggregate_daily_sentiment(combined, symbols, all_dates)
+
+    # ── Save and return ───────────────────────────────────────────────────────
+    daily_sentiment.to_parquet("data/processed/sentiment_daily.parquet", index=False)
+
+    latest = daily_sentiment["date"].max()
+    coverage = (daily_sentiment["article_count"] > 0).mean()
+    print(f"  Saved sentiment_daily.parquet — latest: {latest.date()}, coverage: {coverage:.1%}")
+
+    return daily_sentiment
+
 # ── 4. MAIN ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

@@ -349,6 +349,80 @@ def diagnose_optimizer(signals_df: pd.DataFrame,
     print("\n========== END DIAGNOSTIC ==========\n")
 
 
+def optimize_weights(
+    kelly_weights: dict,
+    features_df:   pd.DataFrame,
+    regime:        str,
+) -> dict:
+    """
+    Live inference wrapper called by execution/run_daily.py.
+
+    Receives pre-computed Kelly weights from compute_kelly_weights() and
+    runs the Markowitz optimization on top. Skips the Kelly step since
+    it was already done — calls build_covariance_matrix, build_expected_returns,
+    and maximise_sharpe directly.
+
+    Args:
+        kelly_weights: dict {symbol: weight} from compute_kelly_weights().
+        features_df:   Full historical features DataFrame (flat, tz-naive).
+        regime:        Today's regime — 'bull' or 'bear'.
+                       ('choppy' is never passed here — gated upstream.)
+
+    Returns:
+        dict of {symbol: final_weight} after Markowitz redistribution.
+        Falls back to kelly_weights if optimization fails.
+    """
+    if not kelly_weights:
+        return {}
+
+    symbols      = list(kelly_weights.keys())
+    kelly_series = pd.Series(kelly_weights)
+    kelly_total  = kelly_series.sum()
+
+    # Prepare features with a 'date' column for covariance lookback
+    df = features_df.copy()
+    if "date" not in df.columns:
+        df["date"] = pd.to_datetime(df["time"]).dt.normalize()
+        if df["date"].dt.tz is not None:
+            df["date"] = df["date"].dt.tz_localize(None)
+
+    latest_date = df["date"].max()
+
+    # ── Covariance matrix ────────────────────────────────────────────────────
+    cov_matrix = build_covariance_matrix(symbols, df, latest_date)
+    if cov_matrix is None:
+        return kelly_weights  # insufficient history — fall back
+
+    # ── Expected returns from Kelly pred_proba proxy ──────────────────────────
+    # Reconstruct a minimal signals DataFrame so build_expected_returns works.
+    # We back out an approximate pred_proba from the Kelly weight:
+    #   kelly_half = ((p*2 - (1-p)) / 2) * 0.5  →  p = (kelly_half / 0.5 * 2 + 1) / 3
+    # Simpler: use the kelly weight magnitude directly as a proxy for confidence.
+    # Expected return = (weight / MAX_WEIGHT) rescaled to [0.35, 0.90] range.
+    proba_proxy = kelly_series / kelly_series.max()          # normalise to [0,1]
+    proba_proxy = 0.35 + proba_proxy * (0.90 - 0.35)         # map to [0.35, 0.90]
+    signals_proxy = proba_proxy.reset_index()
+    signals_proxy.columns = ["symbol", "pred_proba"]
+
+    expected_returns = build_expected_returns(symbols, signals_proxy)
+
+    # ── Markowitz optimisation ────────────────────────────────────────────────
+    max_w = MAX_WEIGHT * 0.7 if regime == "bear" else MAX_WEIGHT
+
+    try:
+        opt_weights = maximise_sharpe(expected_returns, cov_matrix)
+    except Exception:
+        return kelly_weights  # optimisation error — fall back to Kelly
+
+    # Apply regime cap
+    opt_weights = opt_weights.clip(upper=max_w)
+
+    # Rescale: Markowitz splits the capital, Kelly determined the total
+    final_weights = opt_weights * kelly_total
+    final_weights = final_weights.clip(upper=MAX_WEIGHT)
+
+    return final_weights.to_dict()
+
 # ── 6. MAIN ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

@@ -187,6 +187,34 @@ def print_summary():
         print(f"{row[0]}: {row[1]} rows | {row[2].date()} to {row[3].date()}")
     print("------------------------\n")
 
+def ingest_latest(symbols: list, days_back: int = 5) -> None:
+    from datetime import timedelta
+    from alpaca.data.enums import DataFeed
+
+    end   = datetime.utcnow()
+    start = end - timedelta(days=days_back)
+
+    client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
+
+    request = StockBarsRequest(
+        symbol_or_symbols=symbols,
+        timeframe=TimeFrame.Day,
+        start=start,
+        end=end,
+        feed=DataFeed.IEX       # ← free tier uses IEX, not SIP
+    )
+
+    bars = client.get_stock_bars(request)
+    df   = bars.df.reset_index()
+    df.rename(columns={"timestamp": "time"}, inplace=True)
+
+    if df.empty:
+        print("Warning: no data returned — market may have been closed")
+        return
+
+    save_to_timescale(df)
+    print(f"ingest_latest complete — {len(df)} rows fetched")
+
 if __name__ == "__main__":
     # Daily data
     print("=== Fetching Daily Data ===")

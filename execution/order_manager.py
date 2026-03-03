@@ -285,7 +285,7 @@ def place_orders(client: TradingClient,
         log.info(
             f"{'[DRY RUN] ' if dry_run else ''}ORDER: {side.value.upper()} "
             f"${dollar_amount:,.2f} of {symbol} | "
-            f"weight {order['current_weight']:.1%} → {order['target_weight']:.1%} "
+            f"weight {order['current_weight']:.1%} -> {order['target_weight']:.1%} "
             f"(Δ {order['delta_weight']:+.1%})"
         )
 
@@ -409,6 +409,49 @@ def execute_portfolio(target_weights: pd.Series,
         log.error(f"Execution pipeline failed: {e}", exc_info=True)
         return False
 
+# ── 10. OrderManager CLASS (interface for run_daily.py) ──────────────────────
+#
+# Wraps the existing functional pipeline into a class so run_daily.py can do:
+#
+#     manager = OrderManager(dry_run=True)
+#     manager.rebalance(target_weights)  # target_weights is a dict
+#
+# All the real logic stays in the functions above — this is a thin adapter.
+
+class OrderManager:
+    """
+    Class interface to the execution pipeline, used by run_daily.py.
+
+    Args:
+        dry_run: True = log orders only, never place real orders (default).
+                 False = live paper trading. Only set from run_daily.py --live.
+        paper:   Always True. Here for explicitness — never touch live account.
+    """
+
+    def __init__(self, dry_run: bool = True, paper: bool = True):
+        self.dry_run = dry_run
+        self.paper   = paper
+
+    def rebalance(self, target_weights: dict) -> bool:
+        """
+        Rebalance the portfolio toward target_weights.
+
+        Args:
+            target_weights: dict of {symbol: weight} from portfolio_optimiser.
+                            Pass an empty dict {} to liquidate all positions
+                            (pure cash — used in choppy regime).
+
+        Returns:
+            True on success, False if halted by a safeguard or on error.
+        """
+        # Convert dict → pd.Series so compute_order_deltas() works unchanged
+        weights_series = pd.Series(target_weights, dtype=float)
+
+        return execute_portfolio(
+            target_weights = weights_series,
+            paper          = self.paper,
+            dry_run        = self.dry_run,
+        )
 
 # ── 9. MAIN — TEST IN DRY RUN MODE ───────────────────────────────────────────
 

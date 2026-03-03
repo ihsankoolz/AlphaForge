@@ -29,12 +29,12 @@ This is not a research notebook. It is a system — each component has a specifi
 | 6 | Sentiment Layer as Alternative Data | ✅ Done |
 | 6.5 | Sentiment Integration into ML Model (v3) | ✅ Done |
 | 7 | Risk & Portfolio Layer (Kelly + Markowitz) | ✅ Done |
-| 8 | Execution Layer & Paper Trading | 🔄 In Progress |
-| 8.5 | Universe Expansion (200+ stocks) | ⏳ Upcoming |
+| 8 | Execution Layer & Paper Trading | ✅ Done |
+| 8.5 | Universe Expansion (29 → 79 stocks, Batch 1) | ✅ Done |
 | 9 | Dashboard & Visualization | ⏳ Upcoming |
 | 10 | Polish, Documentation & Write-Up | ⏳ Upcoming |
 
-**Note on universe expansion:** Deliberately deferred until after the execution layer is working. Reason: get the risk layer proven on 29 stocks first, then expansion is just plugging more data into an already-tested system. Will slot between Week 8 and Week 9.
+**Note on universe expansion:** Deliberately deferred until after the execution layer was working. Executed as planned — Batch 1 (50 new symbols) completed, system now live on 79 stocks. Batches 2 and 3 planned after validating paper trading stability on 79-symbol universe.
 
 ---
 
@@ -115,7 +115,9 @@ Two tables:
 
 **`ohlcv_hourly`** — same structure but one row per hour per stock
 
-### Our Stock Universe (29 stocks)
+### Our Stock Universe (79 stocks — after Batch 1 expansion)
+
+**Original 29 symbols:**
 
 | Sector | Stocks |
 |--------|--------|
@@ -127,9 +129,27 @@ Two tables:
 | Industrial | CAT, BA, HON, GE |
 | ETFs | SPY, QQQ |
 
-Date range: **January 2020 to December 2025**
+**Batch 1 additions (50 new symbols):**
 
-Why this range? It captures very different market environments — COVID crash (2020), bull run (2021), rate hike selloff (2022), AI rally (2023-2024). This makes regime detection in Week 4 much more meaningful.
+| Sector | Stocks |
+|--------|--------|
+| Tech | TSLA, AVGO, AMD, ORCL, ADBE, CRM, NFLX, QCOM, TXN, CSCO, IBM, NOW, AMAT, MU, INTC |
+| Finance | V, MA, C, WFC, AXP, SCHW, COF, BK |
+| Healthcare | LLY, MRK, AMGN, BMY, GILD, TMO, MDT, ISRG |
+| Consumer | HD, TGT, LOW, BKNG, TJX, MAR |
+| Industrial | RTX, LMT, UPS, DE, ETN |
+| Utilities (NEW) | NEE, DUK |
+| REITs (NEW) | AMT, PLD |
+| Materials (NEW) | LIN, NEM |
+| Communications (NEW) | DIS, VZ |
+
+**Why Batch 1 was prioritised in this order:**
+- V, MA, LLY are bigger market cap than most original holdings yet were missing entirely
+- NEE, DUK, AMT, PLD, LIN introduce 4 genuinely new sectors — these have low correlation to tech/energy/finance, which is exactly what Markowitz needs to find diversification
+- Batch 1 captures ~85% of total diversification benefit. The marginal value of each additional stock drops sharply after ~100 symbols
+- Batches 2 and 3 (planned) will add depth within sectors already covered
+
+Date range: **January 2020 to March 2026** (live from March 2026 onward)
 
 ---
 
@@ -796,6 +816,188 @@ This is expected and correct behavior. The Alpaca connection worked. Market hour
 
 ---
 
+## Week 8 — Completion: Live Inference Wrappers & run_daily.py
+
+### What "Live Inference" Means
+
+Everything built in Weeks 1-7 was research/training code — it ran on historical data to build and validate models. Live inference means taking those trained models and running them every morning on fresh data to generate real trading decisions. Each model needed a wrapper function that:
+1. Loads the trained model from disk
+2. Accepts today's live data as input
+3. Returns predictions in the exact format the next pipeline stage expects
+
+### The 7-Stage Pipeline (run_daily.py)
+
+`execution/run_daily.py` runs every weekday morning at 9:25 AM ET and orchestrates all 7 stages in sequence:
+
+```
+Stage 1 — INGEST:       fetch yesterday's prices → TimescaleDB
+Stage 2 — FEATURES:     recompute features_daily.parquet on full history
+Stage 3 — SENTIMENT:    fetch new articles, score with FinBERT, update cache
+Stage 4 — REGIME:       predict_regime() → bull / choppy / bear
+Stage 5 — ML SIGNALS:   generate_signals() → pred_proba for each stock
+Stage 6 — RISK LAYER:   Kelly → Markowitz → target weights
+Stage 7 — EXECUTION:    OrderManager.rebalance() → Alpaca paper orders
+```
+
+**Graceful degradation:** If any non-critical stage fails, the pipeline logs a WARNING and continues with cached data. Example: if news API is down, it uses yesterday's sentiment rather than crashing entirely. The only stage that halts the pipeline on failure is Stage 7 (execution).
+
+### Live Inference Wrapper — generate_signals()
+
+The most complex wrapper. Key design decisions:
+
+**Why rule-based signals run on full history, not just today:**
+Cross-sectional ranking requires all stocks to be present simultaneously. `momentum_signals()` ranks all 29/79 stocks relative to each other — you can't rank AAPL without seeing MSFT, GOOGL, etc. on the same day. So the function loads the full feature history, runs the signal computation, then filters to the latest date only.
+
+**Regime encoding must match training exactly:**
+```python
+bull=0, choppy=1, bear=2
+```
+If you hardcode `regime='bull'` on a bear day, XGBoost gets regime_encoded=0 instead of 2. The model silently produces wrong probabilities with no error message. This is the kind of bug that destroys live performance without any obvious sign. Fixed by threading the detected regime from Stage 4 all the way through to Stage 5.
+
+**Sentiment joining:**
+If a symbol has no sentiment data for today (zero articles), it gets filled with 0.0 (neutral). This is correct — absence of news is not missing data, it's a genuine signal.
+
+### Live Inference Wrapper — compute_kelly_weights()
+
+Thin wrapper around existing `compute_positions()`. The only non-trivial work is date normalization — extracting the latest date from `features_df` and ensuring timezone consistency before calling the existing function.
+
+### Live Inference Wrapper — optimize_weights()
+
+Cannot directly call `optimise_portfolio()` (which recomputes Kelly internally). Instead calls Markowitz internals directly:
+1. `build_covariance_matrix()` — 60 days of return history
+2. `build_expected_returns()` — needs pred_proba, reconstructed from Kelly weights via rescaling to [0.35, 0.90]
+3. `maximise_sharpe()` — scipy SLSQP solver
+
+**Rescaling logic:** Kelly weights encode signal confidence (higher weight = higher proba). To reconstruct pred_proba: normalize Kelly weights, then map to [0.35, 0.90] range. Not perfect but preserves signal ordering, which is all Markowitz needs.
+
+### Live Inference Wrapper — ingest_latest()
+
+Fetches only the last 5 days of OHLCV data (not full history). Key parameter: `feed=DataFeed.IEX`. Without this, Alpaca returns a 403 error.
+
+**Critical bug encountered:** `feed=DataFeed.IEX` is required for the free Alpaca tier. The default feed is SIP (consolidated tape) which requires a paid subscription. Error message: `subscription does not permit querying recent SIP data`. Fix: add `feed=DataFeed.IEX` to every `StockBarsRequest` call that fetches recent data.
+
+**Why IEX is fine for AlphaForge:** IEX covers ~95% of US market volume. The slight gap only matters for tick-level or volume-sensitive strategies. For daily OHLCV on large-cap stocks, prices are accurate.
+
+**Why 5 days back instead of 1:** Covers weekends and market holidays. `ON CONFLICT DO NOTHING` in the SQL upsert safely handles any duplicate rows.
+
+### Live Inference Wrapper — compute_features()
+
+Recomputes the entire `features_daily.parquet` from scratch every day, loading full history from TimescaleDB.
+
+**Why full recompute instead of incremental:**
+Rolling windows (60-day correlation, 20-day volatility, 14-day RSI) require full lookback. If you only appended today's row, the rolling calculations at the boundary would be wrong. Full recompute takes ~1-2 seconds for 79 symbols — acceptable for a 9:25 AM pipeline.
+
+### First Successful Live Dry Runs
+
+**Run 1 — 29 symbols (2026-03-04):**
+- Ingest: 87 rows fetched, IEX fix applied
+- Features: 43,210 rows, latest 2026-03-03 ✓
+- Sentiment: 4,316 new articles scored (64-day backlog caught up), coverage 67.3%
+- Regime: **BEAR**
+- Signals: 14/29 above threshold
+- Portfolio: 10 positions, 73% invested (correct — bear regime 70% cap)
+- Elapsed: 220s (one-time FinBERT backlog cost, future runs ~26s)
+- Top signals: COP 0.9657, CVX 0.9434, JNJ 0.9401, HON 0.9325, COST 0.9263
+- Portfolio: WMT/COST/SBUX/GE/MCD/PFE at 10.5% each — defensive consumer/healthcare names in bear regime ✓
+- COP, CVX, HON slashed to 2% by Markowitz — correlated energy/industrial cluster
+
+**What "BEAR regime portfolio" should look like and why it does:**
+Bear regime means high volatility, uncertain direction. The correct response is: (1) hold defensive names (consumer staples, healthcare) that don't fall as hard, (2) invest less total capital (73% not 100%), (3) Markowitz clusters correlated stocks and slashes all-but-one within each cluster. WMT, COST, MCD, PFE are genuinely uncorrelated businesses — correct Markowitz behavior.
+
+**Why COP/CVX/HON get slashed to 2% despite high pred_proba:**
+Kelly rewards them for signal confidence. Markowitz then looks at their correlation matrix — COP and CVX have 0.85+ correlation (both move with oil prices), HON and other industrials are similarly correlated. Markowitz: "I can get the energy exposure through XOM alone — holding COP and CVX separately adds risk without adding diversification." This is exactly the insight Markowitz was designed to provide.
+
+### run_sentiment_pipeline() — Incremental Wrapper
+
+Added to `models/sentiment.py`. Key design: **incremental fetch, full recompute.**
+
+**Why incremental fetch:**
+FinBERT took ~3 hours to score the full 105k article history. Each morning there are only ~50-200 new articles. Scoring those takes <10 seconds. The wrapper advances the fetch window from `latest_cached + 1 day` regardless of what `start_date` is passed — so even if `run_daily.py` passes a 7-day safety window, it only fetches genuinely new articles.
+
+**Why full recompute of aggregation:**
+`sentiment_3d` is a 3-day rolling mean. If you only recomputed the last 7 days, the rolling window at the boundary would use stale data. `aggregate_daily_sentiment()` runs on full combined scored cache every time — fast operation (no FinBERT, just pandas groupby).
+
+**Deduplication:** Triple-key check on `(date, symbol, headline)` prevents the same article being scored twice when fetch windows overlap at boundaries.
+
+**Coverage improvement:** 67.3% on 29 symbols → 56.8% on 79 symbols (expected — new symbols dilute coverage initially as their historical backlog integrates). Will increase as daily incremental fetches accumulate.
+
+---
+
+## Week 8.5 — Universe Expansion (29 → 79 Stocks, Batch 1)
+
+### Why Expand the Universe?
+
+Three reasons, in order of importance:
+
+1. **Markowitz needs diversification options.** With 29 stocks, the optimizer can only choose from a limited correlation structure. Adding genuinely new sectors (Utilities, REITs, Materials) gives Markowitz return streams that move differently from tech/energy/finance — exactly what the optimizer exploits.
+
+2. **More training data for XGBoost.** Walk-forward validation on 79 symbols = more (date, symbol) training examples per window. Better generalization, more stable AUC.
+
+3. **Sentiment edge increases.** The 29-stock universe is the most efficiently priced set of companies on earth. Mid-large caps like LIN, NEM, DUK have fewer analysts, news is less instantly priced in — FinBERT signal should strengthen.
+
+### Why NOT Go Straight to 500 Stocks?
+
+- FinBERT historical backfill scales linearly with symbol count. 500 stocks ≈ 20+ hours of CPU scoring (one-time)
+- Walk-forward XGBoost training time grows significantly
+- Bottom half of S&P 500 has sparse news coverage — sentiment features become empty for those symbols
+- Diversification benefit per additional stock drops sharply after ~100 symbols
+- Sweet spot: top ~150 by market cap covers ~90% of diversification benefit with manageable compute cost
+
+### Why Not Include Macro News (Interest Rates, Wars, etc.)?
+
+This was considered and consciously rejected. The problem is **signal attribution** — when a headline says "Fed raises rates 50bps", it's unclear which of your 79 stocks it affects and by how much. Financials and utilities react differently to rate hikes than consumer staples. You'd need a second model mapping macro headlines to per-stock impact — essentially a factor model on top of FinBERT.
+
+More importantly: macro news already leaks through stock-tagged articles. When the Fed hikes rates, Reuters writes 50 articles mentioning JPM, GS, BAC — FinBERT picks up the signal through those. The macro information arrives indirectly but it does arrive.
+
+Decision: revisit after going live. Not worth the engineering complexity before validating the current system.
+
+### The 3-Batch Expansion Plan
+
+| Batch | Symbols | Total After | Status | Key Additions |
+|-------|---------|-------------|--------|---------------|
+| Batch 1 | +50 | 79 | ✅ Done | TSLA, LLY, V, MA, NEE, AMT, DUK, PLD — fills 4 missing sectors |
+| Batch 2 | +50 | 129 | ⏳ After 1 week paper trading | Depth in tech, finance, healthcare |
+| Batch 3 | +50 | 179 | ⏳ Optional | Further mid-caps, more REITs/Utilities |
+
+**Each batch is a ~5-hour CPU job** (90 min news fetch + 3.5 hours FinBERT). Designed to run overnight. After each batch: retrain HMM, retrain XGBoost, verify with dry run before going live.
+
+### scripts/expand_universe_batch1.py — Architecture
+
+One-time script with 3 stages and full checkpointing. Each stage writes a `.done` file so if interrupted mid-run, rerunning skips completed stages:
+
+**Stage 1 — OHLCV backfill (~15 min):** Fetches 2020-2025 daily bars for all 50 new symbols via Alpaca IEX feed. Uses chunks of 10 symbols per API call to avoid timeouts. `ON CONFLICT DO NOTHING` handles any overlaps with existing data.
+
+**Stage 2 — News backfill + FinBERT scoring (~5 hours):** Fetches 2020-2025 news (90 min). Deduplicates against existing scored cache. Scores new articles in checkpointed chunks of 5,000 — so even if interrupted mid-scoring, completed chunks are saved to `data/processed/batch1_scored_chunks/` and resumed on rerun. Merges new scored articles into existing `news_scored.parquet`.
+
+**Stage 3 — Recompute (~2 min):** Rebuilds `features_daily.parquet` and `sentiment_daily.parquet` on full 79-symbol universe.
+
+### Results After Batch 1 Expansion
+
+**Dry run on 2026-03-03 with 79 symbols:**
+- Features: 110,509 rows (was 43,210 — 2.56x more data)
+- Sentiment rows: 117,710 (was 43,210)
+- Scored articles: 213,207 (was 105,542 — doubled)
+- Coverage: 56.8% (was 67.3% — diluted by new symbols, will recover over time)
+- Signals above threshold: 42/79 (was 14/29 — proportionally similar)
+- Elapsed: 27s (same as 29-symbol pipeline — efficient)
+- Regime: **BEAR**
+- Top signals: TGT 0.9813, LMT 0.9714, VZ 0.9672, XOM 0.9646, COP 0.9637
+
+**Key portfolio observation:**
+AMT (REIT) and DUK (Utility) appeared in the top 10 for the first time — genuinely new sector exposure that wasn't available with 29 stocks. Markowitz immediately put them at 10.5% each, confirming they provide diversification value the optimizer hadn't seen before. This is exactly why the expansion was worth doing.
+
+### After Each Batch — Required Steps (Do Not Skip)
+
+1. Update `SYMBOLS` list in `execution/run_daily.py`
+2. `python models/regime_hmm.py` — retrain HMM on expanded universe
+3. `python models/ml_signal.py` — retrain XGBoost on expanded universe (takes 20-30 min)
+4. `python execution/run_daily.py` — dry run to verify
+
+**Why retraining is mandatory, not optional:**
+The HMM computes market-level aggregates (mean RSI, mean volatility) across all symbols — adding 50 symbols changes these aggregates, which changes regime labeling. The XGBoost model was trained on specific feature distributions from 29 stocks — predictions on new symbols with different distribution characteristics will be systematically biased without retraining. Running without retraining = subtly wrong predictions with no error message.
+
+---
+
 ## Questions Asked This Session & Answers
 
 ### "Is Kelly Criterion the only and best way to handle position sizing?"
@@ -816,7 +1018,23 @@ No. AlphaForge is a daily rebalancing system that thinks in week-long horizons (
 
 ### "Should I add universe expansion now or later?"
 
-Later. Rationale: get the risk layer proven on 29 stocks first, then expansion is just plugging more data into an already-tested system. Scheduled between Week 8 and Week 9.
+Later. Rationale: get the risk layer proven on 29 stocks first, then expansion is just plugging more data into an already-tested system. Scheduled between Week 8 and Week 9. Batch 1 now complete.
+
+### "Should we include macro news (wars, interest rates, Fed decisions)?"
+
+Considered and rejected for now. The signal attribution problem is unsolved — you'd need a second model mapping macro headlines to per-stock impact. More importantly, macro news already leaks through stock-tagged articles (when Fed hikes rates, every financial stock gets articles mentioning it). Revisit after going live.
+
+### "Can we use Intel Arc GPU to speed up FinBERT?"
+
+Intel Arc uses DirectML on Windows, not CUDA (NVIDIA-only). `torch-directml` package is available but has limited Python version support and frequently breaks. For a one-time overnight backfill, CPU is simpler and more reliable. The Arc 140V is an integrated GPU sharing system memory — realistic speedup would be 3-5x, not 10x. Not worth the setup friction for a one-time job.
+
+### "Why do we need to run the backfill in batches of 50 stocks instead of all at once?"
+
+Two reasons: (1) CPU strain — each batch is a ~5-hour job and running 150 new symbols at once is a 15-hour overnight job that risks system sleep/interruption. (2) Validate incrementally — run dry run and verify correctness after each batch before adding more complexity. Batch 1 gives 85% of the diversification benefit anyway.
+
+### "How many total stocks will we have in the final universe?"
+
+3 batches planned: Batch 1 (done, +50 → 79 total), Batch 2 (+50 → 129 total), Batch 3 optional (+50 → 179 total). Decision: paper trade on Batch 1 for a week first, then add Batch 2, then evaluate whether Batch 3 is needed. Diminishing returns after ~100 stocks.
 
 ### "Should choppy regime rotate into SPY or hold pure cash?"
 
@@ -995,6 +1213,33 @@ Finish AlphaForge → quant internship (Python research) → learn C++ in parall
 - This is correct behavior, not a bug
 - Test properly on a weekday 9:30 AM - 3:55 PM ET (9:30 PM - 3:55 AM SGT)
 
+**Alpaca data feed — SIP vs IEX:**
+- The free Alpaca tier cannot query recent SIP (consolidated tape) data
+- Error: `subscription does not permit querying recent SIP data` (HTTP 403)
+- Fix: add `feed=DataFeed.IEX` to every `StockBarsRequest` that fetches recent/live data
+- Historical data (2020-2025) works on the free tier regardless of feed
+- IEX covers ~95% of US market volume — accurate prices for large-cap daily OHLCV
+
+**Live inference — regime must be threaded through the pipeline:**
+- generate_signals() receives `regime` as a parameter from run_daily.py
+- Never hardcode `regime='bull'` — if it's a bear day, XGBoost silently gets wrong regime_encoded=0
+- The bug produces no error, just subtly wrong probabilities. Silent corruption is the worst kind.
+
+**Sentiment incremental wrapper — fetch window vs cache boundary:**
+- run_daily.py passes `start_date = today - 7 days` as a safety window
+- run_sentiment_pipeline() ignores this if cache already exists — advances to `latest_cached + 1 day`
+- This means the 7-day window is only used on first-ever run (no cache). Every subsequent run only fetches genuinely new articles.
+
+**Universe expansion — always retrain after adding symbols:**
+- HMM uses market-level aggregates (mean RSI, mean vol) — adding 50 symbols changes these values, changing regime labels
+- XGBoost was trained on specific feature distributions — new symbols have different distributions, predictions will be systematically biased without retraining
+- No error is thrown. System runs but produces wrong predictions. Always retrain after expansion.
+
+**FinBERT checkpoint pattern for long-running jobs:**
+- Score in chunks of 5,000 articles, save each chunk to a separate parquet file
+- On resume: check if chunk file exists, skip scoring, load from disk
+- This prevents re-scoring thousands of articles if the process is interrupted at hour 3 of a 5-hour job
+
 ---
 
 ## File Structure Reference
@@ -1003,10 +1248,11 @@ Finish AlphaForge → quant internship (Python research) → learn C++ in parall
 AlphaForge/
 ├── data/
 │   ├── ingest.py                               ← pulls OHLCV from Alpaca, stores in TimescaleDB
+│   │                                              ingest_latest() uses feed=DataFeed.IEX (required for free tier)
 │   ├── validate.py                             ← checks data quality
 │   ├── raw/
 │   └── processed/
-│       ├── features_daily.parquet              ← 43,123 rows, 22 features, index: [time, symbol]
+│       ├── features_daily.parquet              ← 110,509 rows, 22 features (79 symbols × ~1,490 days)
 │       ├── regime_labels.parquet               ← daily regime label (bull/choppy/bear)
 │       ├── backtest_momentum.parquet           ← momentum strategy daily P&L
 │       ├── backtest_mean_reversion.parquet     ← mean reversion daily P&L
@@ -1014,8 +1260,10 @@ AlphaForge/
 │       ├── backtest_ml.parquet                 ← ML + Risk Layer v3 daily P&L
 │       ├── ml_signals.parquet                  ← XGBoost v3 probability scores per stock per day
 │       ├── news_raw.parquet                    ← raw articles from Alpaca News API (cached)
-│       ├── news_scored.parquet                 ← articles with FinBERT sentiment scores (cached)
-│       └── sentiment_daily.parquet             ← daily sentiment features per stock
+│       ├── news_scored.parquet                 ← 213,207 articles with FinBERT scores
+│       ├── sentiment_daily.parquet             ← 117,710 rows daily sentiment per stock
+│       ├── batch1_news_raw.parquet             ← raw news for Batch 1 new symbols (cached)
+│       └── batch1_scored_chunks/               ← checkpointed FinBERT scoring (5k articles each)
 ├── research/
 │   ├── features/
 │   │   └── engineer.py                        ← computes all 22 features
@@ -1027,19 +1275,22 @@ AlphaForge/
 │   │   └── ml_backtest.py                     ← ML + Risk Layer backtest (v3)
 │   └── notebooks/
 ├── models/
-│   ├── regime_hmm.py                          ← trains HMM, labels regimes, saves model
-│   ├── hmm_model.pkl                          ← trained HMM + scaler (pickle)
-│   ├── ml_signal.py                           ← XGBoost v3 (with sentiment), walk-forward
-│   ├── xgb_model.pkl                          ← final trained XGBoost v3 model (pickle)
-│   └── sentiment.py                           ← Alpaca news fetch + FinBERT scoring pipeline
+│   ├── regime_hmm.py                          ← trains HMM; predict_regime() live wrapper
+│   ├── hmm_model.pkl                          ← trained HMM + scaler — retrained on 79 symbols
+│   ├── ml_signal.py                           ← XGBoost v3; generate_signals() live wrapper
+│   ├── xgb_model.pkl                          ← trained XGBoost v3 — retrained on 79 symbols
+│   └── sentiment.py                           ← FinBERT pipeline; run_sentiment_pipeline() wrapper
 ├── risk/
 │   ├── __init__.py                            ← makes risk/ importable as a module
-│   ├── position_sizer.py                      ← Kelly Criterion + volatility adjustment
-│   └── portfolio_optimiser.py                 ← Markowitz mean-variance Sharpe maximization
+│   ├── position_sizer.py                      ← Kelly Criterion; compute_kelly_weights() wrapper
+│   └── portfolio_optimiser.py                 ← Markowitz; optimize_weights() wrapper
 ├── execution/
 │   ├── __init__.py                            ← makes execution/ importable as a module
 │   ├── order_manager.py                       ← Alpaca paper trading order execution
-│   └── run_daily.py                           ← daily pipeline orchestrator (Week 8, pending)
+│   └── run_daily.py                           ← 7-stage daily pipeline orchestrator (COMPLETE)
+├── scripts/
+│   └── expand_universe_batch1.py              ← one-time universe expansion script
+│                                                 3 stages, checkpointed, safe to interrupt/resume
 ├── dashboard/                                 ← Week 9
 ├── logs/
 │   └── trading_YYYYMMDD.log                   ← daily execution logs
@@ -1077,36 +1328,42 @@ zoneinfo         ← timezone handling for market hours check ← NEW Week 8
 
 ## What's Coming Next
 
-### Immediate Next Step — run_daily.py (Week 8 completion)
-Build the daily pipeline orchestrator that wires all existing components together into one automated morning script. Test with order_manager.py in dry_run=True mode on a weekday during market hours. Then switch to dry_run=False for live paper trading.
+### Immediate Next Step — Go Live (Paper Trading)
 
-### Week 8.5 — Universe Expansion
-Expand from 29 → 200+ stocks. Steps: update `data/ingest.py` to fetch new tickers, re-run `engineer.py` for feature computation, retrain ML model (walk-forward will take longer), update regime HMM on expanded universe. This unlocks viable short selling and makes sentiment features more powerful.
+Pipeline is fully operational on 79 symbols. Run `python execution/run_daily.py --live` on a weekday morning between 9:25-9:30 AM ET (9:25-9:30 PM SGT). First live paper trade execution. Monitor the logs carefully — the first real rebalance on a fresh $100,000 account should place 10 buy orders. Verify order confirmations in the Alpaca paper trading dashboard.
+
+### Week 8.5 — Universe Expansion Batch 2 (after 1 week paper trading)
+
+Add 50 more symbols → 129 total. Focus: depth within existing sectors. Run `scripts/expand_universe_batch2.py` (to be built), retrain HMM + XGBoost, verify dry run. Trigger: after confirming Batch 1 paper trading is stable for ~5 trading days.
 
 ### Week 9 — Streamlit Dashboard
+
 Live P&L curve, current positions, strategy performance by regime, sentiment signals, risk metrics updating daily.
 
 ### Week 10 — Polish & Write-Up
+
 Clean README, demo video, docstrings throughout, Medium article. Best story: the regime detection value-add (186% → how pure cash during choppy doubled returns). Second story: sentiment's role in efficient vs inefficient markets.
 
 ---
 
 ## Areas for Improvement
 
-1. **Universe expansion** — the biggest single lever. Mid/small cap stocks have less efficient pricing, making sentiment and ML signals much more powerful. Also enables viable short selling.
+1. **Universe expansion (Batches 2 & 3)** — Batch 1 done. Batches 2 and 3 will add depth within sectors and push toward 129-179 symbols. Each batch requires overnight CPU run + retrain. Expected improvement: sentiment coverage will grow as mid-large caps have fewer analysts covering them (news less instantly priced in), Markowitz will find even more diversification options.
 
 2. **Covariance estimation** — the 60-day lookback assumes stable correlations. In crises, correlations spike (everything moves together). Black-Litterman or robust optimization would handle this better.
 
 3. **Kelly odds calibration** — we hardcoded b=2.0 based on the signal quality table. In production, this should be estimated from rolling historical data and updated quarterly.
 
-4. **Sentiment coverage** — 49% effective coverage. After universe expansion to stocks with fewer analysts, coverage will improve and sentiment will show more edge.
+4. **Sentiment coverage** — currently 56.8% on 79 symbols (was 67.3% on 29 — diluted by Batch 1 new symbols). Will recover as daily incremental fetches accumulate for new symbols. After Batch 2 symbols get months of article history, coverage should return to 65%+.
 
 5. **Transaction cost model** — our 0.1% flat cost is a simplification. Real costs depend on order size, volatility, and time of day. A more realistic model would improve backtest accuracy.
 
-6. **Short selling** — currently long-only due to universe composition bias. After expanding to 200+ stocks including genuine losers, short selling becomes viable and should improve Sharpe.
+6. **Short selling** — currently long-only due to universe composition bias (all stocks are large-cap winners). After Batches 2 and 3 include more mid-caps and genuine laggards, short selling becomes more viable.
 
 7. **Turnover constraint** — currently no explicit limit on how much the portfolio changes day-to-day. High turnover = high transaction costs. Adding a turnover penalty to the Markowitz objective would reduce costs.
 
+8. **Sentiment staleness degradation** — currently the model uses stale sentiment (when pipeline runs during market hours, yesterday's articles are already 12+ hours old). Adding a staleness discount to sentiment features could improve signal freshness.
+
 ---
 
-*Last updated: End of Week 7 / Start of Week 8 — Sentiment integration (v3 ML model, 0.829 AUC, 7.3% sentiment importance), Risk Layer complete (Kelly + Markowitz, Sharpe 0.49, max drawdown -15.54%), Order Manager built and connection tested. Next: run_daily.py to complete Week 8, then universe expansion and dashboard.*
+*Last updated: End of Week 8 / Week 8.5 — Full execution layer complete. All live inference wrappers built (generate_signals, compute_kelly_weights, optimize_weights, ingest_latest, compute_features, run_sentiment_pipeline). run_daily.py 7-stage orchestrator operational. Universe expanded 29 → 79 symbols (Batch 1: 50 new symbols across 4 new sectors). Pipeline verified on live 2026-03-03 data in 27s. BEAR regime detected, 42/79 signals above threshold, 10 positions selected (AMT/DUK/RTX/LOW/TJX/BA leading — Utilities and REITs appearing for first time). Ready for live paper trading. Next: flip to --live, paper trade 1 week, then Batch 2 expansion, then Week 9 dashboard.*
