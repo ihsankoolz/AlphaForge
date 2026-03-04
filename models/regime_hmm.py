@@ -160,6 +160,108 @@ def save_outputs(regime_df, model, scaler, label_map):
     print("Saved: data/processed/regime_labels.parquet")
     print("Saved: models/hmm_model.pkl")
 
+# ── 7. LIVE INFERENCE — predict_regime() ─────────────────────────────────────
+#
+# Add this function to models/regime_hmm.py.
+# Called by execution/run_daily.py each morning to get today's regime.
+
+def predict_regime(features_df: pd.DataFrame,
+                   model_path: str = "models/hmm_model.pkl") -> str:
+    """
+    Predict today's market regime using the trained HMM.
+
+    Args:
+        features_df: flat DataFrame with columns [time, symbol, return_1d,
+                     volatility_20d, rsi_14, macd_hist, bb_pct, volume_ratio, ...]
+                     as produced by run_daily.py (already reset_index'd, tz-naive).
+        model_path:  path to hmm_model.pkl saved during training.
+
+    Returns:
+        'bull', 'choppy', or 'bear' for the most recent date in features_df.
+
+    Raises:
+        FileNotFoundError if model_path doesn't exist.
+        ValueError if features_df is missing required columns.
+    """
+    # ── Load trained artefacts ───────────────────────────────────────────────
+    with open(model_path, "rb") as f:
+        bundle = pickle.load(f)
+
+    model     = bundle["model"]       # trained GaussianHMM
+    scaler    = bundle["scaler"]      # StandardScaler fitted on training data
+    label_map = bundle["label_map"]   # {raw_int_state: 'bull'/'choppy'/'bear'}
+
+    # ── Aggregate stock-level → market-level ─────────────────────────────────
+    # Exact same aggregation as load_market_features() during training.
+    # This MUST match — any deviation means the scaler receives a differently
+    # constructed feature vector and predictions will be garbage.
+    df = features_df.copy()
+
+    # Normalise time column to plain date for groupby
+    df["date"] = pd.to_datetime(df["time"]).dt.normalize()
+    if df["date"].dt.tz is not None:
+        df["date"] = df["date"].dt.tz_localize(None)
+    df["date"] = df["date"].dt.date
+
+    required = ["return_1d", "volatility_20d", "rsi_14",
+                "macd_hist", "bb_pct", "volume_ratio"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"features_df missing columns: {missing}")
+
+    daily = df.groupby("date").agg(
+        mean_return       = ("return_1d",      "mean"),
+        vol_return        = ("return_1d",      "std"),
+        mean_volatility   = ("volatility_20d", "mean"),
+        mean_rsi          = ("rsi_14",         "mean"),
+        mean_macd_hist    = ("macd_hist",      "mean"),
+        mean_bb_pct       = ("bb_pct",         "mean"),
+        mean_volume_ratio = ("volume_ratio",   "mean"),
+    ).dropna()
+
+    daily.index = pd.to_datetime(daily.index)
+
+    if len(daily) == 0:
+        raise ValueError("features_df produced no market-level rows after aggregation")
+
+    # ── Winsorise using FULL history bounds ───────────────────────────────────
+    # Critical: we compute percentile bounds from ALL available history,
+    # not just today's single row. One row has no meaningful percentiles.
+    # Using full history matches what training did — same clip bounds,
+    # same effective feature distribution entering the scaler.
+    feature_cols = [
+        "mean_return", "vol_return", "mean_volatility",
+        "mean_rsi", "mean_macd_hist", "mean_bb_pct", "mean_volume_ratio"
+    ]
+    X_all = daily[feature_cols].values
+    lower = np.percentile(X_all, 1,  axis=0)
+    upper = np.percentile(X_all, 99, axis=0)
+    X_all_clipped = np.clip(X_all, lower, upper)
+
+    # ── Scale using the SAVED scaler ─────────────────────────────────────────
+    # We use scaler.transform() NOT scaler.fit_transform().
+    # The scaler's mean/std were fixed at training time on 2020-2025 data.
+    # Refitting on today's data would shift the coordinate system and
+    # invalidate all the model's learned state boundaries.
+    X_scaled = scaler.transform(X_all_clipped)
+
+    # ── Predict on the LAST row only ─────────────────────────────────────────
+    # model.predict() on the full sequence uses the Viterbi algorithm,
+    # which considers transitions across the entire history — more accurate
+    # than predicting a single point in isolation.
+    raw_states  = model.predict(X_scaled)
+    last_state  = int(raw_states[-1])
+    regime      = label_map.get(last_state)
+
+    if regime not in ("bull", "choppy", "bear"):
+        raise ValueError(
+            f"label_map returned unexpected regime '{regime}' for state {last_state}. "
+            f"label_map contents: {label_map}"
+        )
+
+    latest_date = daily.index[-1].date()
+    return regime
+
 # ── 6. MAIN ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

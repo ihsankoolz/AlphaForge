@@ -277,6 +277,44 @@ def diagnose_sizer(signals_df: pd.DataFrame,
     print("\n========== END DIAGNOSTIC ==========\n")
 
 
+def compute_kelly_weights(
+    signals_df:  pd.DataFrame,
+    features_df: pd.DataFrame,
+) -> dict:
+    """
+    Live inference wrapper called by execution/run_daily.py.
+
+    Extracts the latest date from features_df, filters signals to that date,
+    and runs the full Kelly + vol adjustment pipeline via compute_positions().
+
+    Args:
+        signals_df:  DataFrame with columns [symbol, pred_proba] — output of
+                     generate_signals() for today.
+        features_df: Full historical features DataFrame (flat, tz-naive) —
+                     needed for volatility lookback in volatility_adjust().
+
+    Returns:
+        dict of {symbol: weight} for symbols above MIN_PROB threshold.
+        Empty dict if no symbols qualify.
+    """
+    # Get the latest date available in features (= yesterday's close)
+    latest_date = pd.to_datetime(features_df["time"]).max()
+
+    # compute_positions() expects a 'date' column in features_df
+    df = features_df.copy()
+    if "date" not in df.columns:
+        df["date"] = pd.to_datetime(df["time"]).dt.normalize()
+        if df["date"].dt.tz is not None:
+            df["date"] = df["date"].dt.tz_localize(None)
+
+    weights_series = compute_positions(
+        signals_today=signals_df,
+        features_df=df,
+        date=latest_date,
+    )
+
+    return weights_series.to_dict()
+
 # ── 6. MAIN — RUN STANDALONE TO TEST ─────────────────────────────────────────
 
 if __name__ == "__main__":

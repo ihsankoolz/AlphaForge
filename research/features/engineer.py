@@ -179,6 +179,25 @@ def engineer_features(save=True):
     
     return df
 
+def compute_features(symbols: list) -> pd.DataFrame:
+    """
+    Recompute all 22 features from TimescaleDB and overwrite
+    features_daily.parquet. Called every morning by run_daily.py
+    after ingest_latest() has upserted fresh data.
+
+    Recomputes full history every day because rolling windows
+    (60-day correlation, 20-day volatility) need full lookback to
+    be valid. Takes ~10-15s — fine for a 9:25 AM pipeline.
+
+    The symbols parameter is kept for interface compatibility but
+    unused — engineer_features() loads all symbols in TimescaleDB.
+    """
+    print("compute_features: recomputing all features from TimescaleDB...")
+    df = engineer_features(save=True)
+    latest = df.index.get_level_values('time').max().date()
+    print(f"compute_features complete — {len(df):,} rows, latest: {latest}")
+    return df
+
 if __name__ == "__main__":
     df = engineer_features()
     print("\nSample for AAPL:")
