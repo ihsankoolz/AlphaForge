@@ -10,6 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from strategies.backtest import calculate_metrics
 from risk.portfolio_optimiser import optimise_portfolio
+from risk.transaction_costs import compute_backtest_cost
 
 # ── 1. LOAD DATA ─────────────────────────────────────────────────────────────
 
@@ -32,7 +33,7 @@ def load_data():
 # ── 2. RUN ML BACKTEST (with Risk Layer) ─────────────────────────────────────
 
 def run_ml_backtest(features, signals, regimes,
-                    initial_capital=100_000, transaction_cost=0.001,
+                    initial_capital=100_000,
                     top_n=10, min_signal=0.35):
     """
     Trade using ML signals routed through the full risk layer:
@@ -101,12 +102,13 @@ def run_ml_backtest(features, signals, regimes,
         signal_date   = prior_signal_dates[-1]
         signals_today = signals[signals["date"] == signal_date].copy()
 
-        # KELLY + MARKOWITZ RISK LAYER
+        # KELLY + MARKOWITZ RISK LAYER (with turnover penalty)
         final_weights = optimise_portfolio(
             signals_today = signals_today,
             features_df   = features,
             date          = date,
-            regime        = regime
+            regime        = regime,
+            prev_weights  = prev_positions[prev_positions > 0],
         )
 
         # Map weights back to full symbol universe
@@ -115,9 +117,8 @@ def run_ml_backtest(features, signals, regimes,
             if symbol in positions.index:
                 positions[symbol] = weight
 
-        # Transaction costs
-        position_changes = (positions - prev_positions).abs()
-        cost = position_changes.sum() * transaction_cost
+        # Transaction costs — per-stock model (spread + impact + volatility)
+        cost = compute_backtest_cost(positions, prev_positions, features, date)
 
         # P&L
         pnl = (positions * day_rets).sum()

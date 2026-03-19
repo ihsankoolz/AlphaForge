@@ -473,10 +473,17 @@ def run_risk_layer(
 
     # ── 6b: Markowitz Portfolio Optimization ────────────────────────────────
     try:
+        from execution.monitoring import get_previous_weights as _get_prev
+        prev_w = _get_prev()
+    except Exception:
+        prev_w = {}
+
+    try:
         final_weights: dict[str, float] = optimize_weights(
             kelly_weights=kelly_weights,
             features_df=features_df,
             regime=regime,
+            prev_weights=prev_w if prev_w else None,
         )
     except Exception as exc:
         logger.error(f'Markowitz optimizer error: {exc}', exc_info=True)

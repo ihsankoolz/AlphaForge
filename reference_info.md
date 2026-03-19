@@ -1461,11 +1461,11 @@ This section documents a comprehensive code review performed across the entire c
 
 3. **Sentiment coverage** — currently 56.8% on 79 symbols. Will recover as daily incremental fetches accumulate for new symbols.
 
-4. **Transaction cost model** — our 0.1% flat cost is a simplification. Real costs depend on order size, volatility, and time of day.
+4. ~~**Transaction cost model**~~ → **FIXED.** Added `risk/transaction_costs.py` with per-stock cost model: half-spread (liquidity-tiered, 0.5-5bp) + square-root market impact. Replaces flat 0.1% in ml_backtest.py. Configurable via `config/settings.py`.
 
 5. **Short selling** — currently long-only due to universe composition bias. After Batches 2 and 3 include more mid-caps, short selling becomes more viable.
 
-6. **Turnover constraint** — circuit breakers now WARN on >50% turnover, but the Markowitz objective doesn't penalize it. Adding a turnover penalty would reduce costs.
+6. ~~**Turnover constraint**~~ → **FIXED.** Added turnover penalty (L1 norm × λ) to `maximise_sharpe()` in `risk/portfolio_optimiser.py`. Optimizer now penalizes weight changes vs previous day, reducing unnecessary trading. λ configurable via `TURNOVER_PENALTY_LAMBDA` in settings.
 
 7. **Sentiment staleness degradation** — articles from yesterday are 12+ hours old by trade time. Adding a staleness discount could improve freshness.
 
@@ -1473,4 +1473,4 @@ This section documents a comprehensive code review performed across the entire c
 
 ---
 
-*Last updated: March 2026 — Comprehensive code review completed. 10 improvements implemented: lookahead bias fix, centralised config, Kelly calibration, model versioning, circuit breakers, monitoring/alerting, structured order tracking, has_news feature, non-overlapping AUC, 51 unit tests. All tests passing. Pipeline ready for live paper trading on 79 symbols. Next: live paper trade 1 week, Batch 2 expansion, Week 9 dashboard, post-Week 10 microservices evolution.*
+*Last updated: March 2026 — 12 improvements implemented. Latest: realistic transaction cost model (per-stock spread + market impact replacing flat 0.1%) and Markowitz turnover penalty (L1 norm in objective reduces unnecessary trading). All 51 tests passing. Pipeline ready for live paper trading on 79 symbols. Next: live paper trade 1 week, Batch 2 expansion, Week 9 dashboard.*

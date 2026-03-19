@@ -3,7 +3,10 @@
     "allow": [
       "Bash(python -m pytest tests/ -v --tb=short)",
       "Bash(venv/Scripts/pip install:*)",
-      "Bash(venv/Scripts/python -m pytest tests/ -v --tb=short)"
+      "Bash(venv/Scripts/python -m pytest tests/ -v --tb=short)",
+      "Bash(venv/Scripts/python -m pytest tests/ -v)",
+      "Bash(schtasks /query /tn \"AlphaForge Daily Pipeline\")",
+      "Bash(schtasks //query //tn \"AlphaForge Daily Pipeline\")"
     ]
   }
 }

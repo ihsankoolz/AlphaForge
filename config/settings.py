@@ -130,6 +130,13 @@ FEATURE_COLS = [
 ]
 
 # ---------------------------------------------------------------------------
+# Transaction costs
+# ---------------------------------------------------------------------------
+DEFAULT_HALF_SPREAD_BP = 2.5    # basis points — default spread for large-cap
+MARKET_IMPACT_SCALE    = 0.01   # impact model scale factor
+TURNOVER_PENALTY_LAMBDA = 0.005 # Markowitz turnover penalty strength
+
+# ---------------------------------------------------------------------------
 # Pipeline circuit breakers
 # ---------------------------------------------------------------------------
 CB_MAX_SIGNAL_RATIO     = 0.80   # halt if >80% of stocks above threshold

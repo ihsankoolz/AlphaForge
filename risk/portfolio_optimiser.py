@@ -33,7 +33,7 @@ from risk.position_sizer import compute_positions
 
 from config.settings import (
     COV_LOOKBACK, MIN_WEIGHT, MAX_WEIGHT, RISK_FREE_RATE,
-    MIN_STOCKS, MAX_POSITION,
+    MIN_STOCKS, MAX_POSITION, TURNOVER_PENALTY_LAMBDA,
 )
 
 
@@ -126,27 +126,28 @@ def build_expected_returns(symbols: list,
 # ── 3. SHARPE MAXIMISATION ───────────────────────────────────────────────────
 
 def maximise_sharpe(expected_returns: pd.Series,
-                    cov_matrix: pd.DataFrame) -> pd.Series:
+                    cov_matrix: pd.DataFrame,
+                    prev_weights: pd.Series = None) -> pd.Series:
     """
-    Find portfolio weights that maximise the Sharpe ratio.
+    Find portfolio weights that maximise the Sharpe ratio, penalising turnover.
 
-    Sharpe = (portfolio_return - risk_free_rate) / portfolio_volatility
+    Objective:
+        maximise  Sharpe(w)  -  λ × ||w - w_prev||₁
 
-    This is a constrained optimisation problem solved with scipy.minimize.
-    We minimise negative Sharpe (scipy only minimises, not maximises).
+    The turnover penalty (λ = TURNOVER_PENALTY_LAMBDA) discourages the optimizer
+    from making large weight changes that would incur transaction costs.
+    Without this, the optimizer freely reshuffles weights daily even when the
+    expected return improvement is smaller than the trading cost.
 
     Constraints:
       - Weights sum to 1.0 (fully invested within selected stocks)
       - Each weight between MIN_WEIGHT and MAX_WEIGHT
       - Long-only (weights ≥ 0, enforced by bounds)
 
-    Note: we optimise weights within the selected stock universe.
-    The Kelly sizer already decided WHICH stocks to hold.
-    Markowitz decides HOW MUCH of each to hold.
-
     Args:
         expected_returns: Annualised expected returns per stock
         cov_matrix:       Annualised covariance matrix
+        prev_weights:     Previous day's weights (None on first day)
 
     Returns:
         Optimal weights as Series, index = symbol
@@ -164,17 +165,34 @@ def maximise_sharpe(expected_returns: pd.Series,
 
     n = len(symbols)
 
-    def neg_sharpe(weights):
-        """Objective: minimise negative Sharpe = maximise Sharpe."""
+    # Previous weights aligned to current symbol set (0 for new stocks)
+    if prev_weights is not None:
+        w_prev = prev_weights.reindex(symbols, fill_value=0.0).values
+    else:
+        w_prev = None
+
+    def neg_sharpe_with_turnover(weights):
+        """Objective: maximise Sharpe minus turnover penalty."""
         port_return = weights @ mu
         port_vol    = np.sqrt(weights @ cov @ weights)
         if port_vol < 1e-8:
             return 0.0
         sharpe = (port_return - RISK_FREE_RATE * 252) / port_vol
-        return -sharpe
 
-    # Starting point: equal weights
-    w0 = np.ones(n) / n
+        # Turnover penalty: L1 norm of weight changes × lambda
+        turnover_cost = 0.0
+        if w_prev is not None:
+            turnover_cost = TURNOVER_PENALTY_LAMBDA * np.sum(np.abs(weights - w_prev))
+
+        return -sharpe + turnover_cost
+
+    # Starting point: previous weights if available, else equal weights
+    if w_prev is not None:
+        # Clip to bounds and renormalise for a feasible start
+        w0 = np.clip(w_prev, MIN_WEIGHT, MAX_WEIGHT)
+        w0 = w0 / w0.sum() if w0.sum() > 0 else np.ones(n) / n
+    else:
+        w0 = np.ones(n) / n
 
     # Constraints: weights must sum to 1.0
     constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
@@ -183,7 +201,7 @@ def maximise_sharpe(expected_returns: pd.Series,
     bounds = [(MIN_WEIGHT, MAX_WEIGHT)] * n
 
     result = minimize(
-        neg_sharpe,
+        neg_sharpe_with_turnover,
         w0,
         method="SLSQP",          # Sequential Least Squares — standard for
         bounds=bounds,            # constrained portfolio optimisation
@@ -205,7 +223,8 @@ def maximise_sharpe(expected_returns: pd.Series,
 def optimise_portfolio(signals_today: pd.DataFrame,
                        features_df: pd.DataFrame,
                        date: pd.Timestamp,
-                       regime: str = "bull") -> pd.Series:
+                       regime: str = "bull",
+                       prev_weights: pd.Series = None) -> pd.Series:
     """
     Full optimisation pipeline for one trading day.
 
@@ -259,7 +278,7 @@ def optimise_portfolio(signals_today: pd.DataFrame,
     expected_returns = build_expected_returns(symbols, signals_today)
 
     # ── STEP 4: MARKOWITZ OPTIMISATION ───────────────────────────────────────
-    opt_weights = maximise_sharpe(expected_returns, cov_matrix)
+    opt_weights = maximise_sharpe(expected_returns, cov_matrix, prev_weights)
 
     # Apply bear regime tighter cap
     opt_weights = opt_weights.clip(upper=max_w)
@@ -344,6 +363,7 @@ def optimize_weights(
     kelly_weights: dict,
     features_df:   pd.DataFrame,
     regime:        str,
+    prev_weights:  dict = None,
 ) -> dict:
     """
     Live inference wrapper called by execution/run_daily.py.
@@ -400,8 +420,11 @@ def optimize_weights(
     # ── Markowitz optimisation ────────────────────────────────────────────────
     max_w = MAX_WEIGHT * 0.7 if regime == "bear" else MAX_WEIGHT
 
+    # Convert prev_weights dict to Series for the optimizer
+    prev_w_series = pd.Series(prev_weights) if prev_weights else None
+
     try:
-        opt_weights = maximise_sharpe(expected_returns, cov_matrix)
+        opt_weights = maximise_sharpe(expected_returns, cov_matrix, prev_w_series)
     except Exception:
         return kelly_weights  # optimisation error — fall back to Kelly
 
