@@ -214,6 +214,13 @@ def aggregate_daily_sentiment(scored_df, symbols, all_dates):
         "article_count":     0.0
     })
 
+    # Binary indicator: did this stock have ANY news today?
+    # Absence of news for a stock that normally has 3-5 articles/day is
+    # informative — may signal pre-earnings quiet period, trading halt, etc.
+    # Treating it as a separate feature lets the model distinguish "no news
+    # and neutral" from "news existed and was perfectly neutral".
+    full["has_news"] = (full["article_count"] > 0).astype(float)
+
     # Rolling 3-day sentiment — smooths out single-day noise
     full = full.sort_values(["symbol", "date"])
     full["sentiment_3d"] = (

@@ -29,21 +29,12 @@ warnings.filterwarnings("ignore")
 # Ensure project root is on the path so local modules resolve correctly
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from risk.position_sizer import compute_positions, MIN_PROB, MAX_POSITION
+from risk.position_sizer import compute_positions
 
-
-# ── CONSTANTS ────────────────────────────────────────────────────────────────
-
-COV_LOOKBACK    = 60    # days of return history to estimate covariance
-                        # 60 days ≈ 3 months — enough to be stable,
-                        # short enough to reflect current market structure
-MIN_WEIGHT      = 0.02  # minimum position size — no slivers below 2%
-                        # positions below this get zeroed out
-MAX_WEIGHT      = MAX_POSITION   # inherit 15% cap from position sizer
-RISK_FREE_RATE  = 0.05 / 252     # daily risk-free rate (~5% annual, 2021-2025
-                                  # approximate US Fed funds rate average)
-MIN_STOCKS      = 2     # need at least 2 stocks to optimize correlations
-                        # (1 stock = just use Kelly weight directly)
+from config.settings import (
+    COV_LOOKBACK, MIN_WEIGHT, MAX_WEIGHT, RISK_FREE_RATE,
+    MIN_STOCKS, MAX_POSITION,
+)
 
 
 # ── 1. BUILD COVARIANCE MATRIX ───────────────────────────────────────────────

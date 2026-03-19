@@ -27,7 +27,6 @@ Safeguards (hard limits that cannot be overridden):
 import os
 import sys
 import logging
-import math
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
@@ -36,8 +35,8 @@ import pandas as pd
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
+from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -276,6 +275,7 @@ def place_orders(client: TradingClient,
     Returns list of successfully placed order IDs.
     """
     placed = []
+    failed = []
 
     for order in orders:
         symbol        = order["symbol"]
@@ -290,7 +290,13 @@ def place_orders(client: TradingClient,
         )
 
         if dry_run:
-            placed.append(f"DRY_RUN_{symbol}")
+            placed.append({
+                "id": f"DRY_RUN_{symbol}",
+                "symbol": symbol,
+                "side": side.value,
+                "amount": dollar_amount,
+                "status": "dry_run",
+            })
             continue
 
         try:
@@ -301,11 +307,31 @@ def place_orders(client: TradingClient,
                 time_in_force= TimeInForce.DAY
             )
             result = client.submit_order(req)
-            placed.append(result.id)
-            log.info(f"  → Order submitted: {result.id}")
+            placed.append({
+                "id": str(result.id),
+                "symbol": symbol,
+                "side": side.value,
+                "amount": dollar_amount,
+                "status": str(result.status),
+            })
+            log.info(f"  → Order submitted: {result.id} (status: {result.status})")
 
         except Exception as e:
+            failed.append({
+                "symbol": symbol,
+                "side": side.value,
+                "amount": dollar_amount,
+                "error": str(e),
+            })
             log.error(f"  → Order FAILED for {symbol}: {e}")
+
+    # Log order confirmation summary
+    if placed or failed:
+        log.info(f"\n  Order confirmation: {len(placed)} submitted, {len(failed)} failed")
+        if failed:
+            log.error(f"  FAILED ORDERS:")
+            for f_order in failed:
+                log.error(f"    {f_order['symbol']}: {f_order['error']}")
 
     return placed
 
@@ -314,7 +340,6 @@ def place_orders(client: TradingClient,
 
 def log_execution_summary(target_weights: pd.Series,
                           current_snapshot: dict,
-                          orders: list,
                           placed_ids: list):
     """
     Print a clean summary of what the system did today.
@@ -401,7 +426,7 @@ def execute_portfolio(target_weights: pd.Series,
         placed = place_orders(client, orders, dry_run=dry_run)
 
         # Step 7: Log summary
-        log_execution_summary(target_weights, snapshot, orders, placed)
+        log_execution_summary(target_weights, snapshot, placed)
 
         return True
 

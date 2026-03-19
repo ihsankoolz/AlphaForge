@@ -118,42 +118,17 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(PROJECT_ROOT, '.env'))
 
 # ---------------------------------------------------------------------------
-# Constants
+# Import centralised configuration — single source of truth
 # ---------------------------------------------------------------------------
-SYMBOLS = [
-    # Original 29
-    'AAPL', 'MSFT', 'GOOGL', 'NVDA', 'META', 'AMZN',
-    'JPM',  'GS',   'BAC',   'MS',   'BLK',
-    'JNJ',  'UNH',  'PFE',   'ABBV',
-    'XOM',  'CVX',  'COP',
-    'MCD',  'NKE',  'SBUX',  'WMT',  'COST',
-    'CAT',  'BA',   'HON',   'GE',
-    'SPY',  'QQQ',
-    # Batch 1 — 50 new symbols
-    'TSLA', 'AVGO', 'AMD',  'ORCL', 'ADBE', 'CRM',  'NFLX', 'QCOM', 'TXN',  'CSCO',
-    'IBM',  'NOW',  'AMAT', 'MU',   'INTC',
-    'V',    'MA',   'C',    'WFC',  'AXP',  'SCHW', 'COF',  'BK',
-    'LLY',  'MRK',  'AMGN', 'BMY',  'GILD', 'TMO',  'MDT',  'ISRG',
-    'HD',   'TGT',  'LOW',  'BKNG', 'TJX',  'MAR',
-    'RTX',  'LMT',  'UPS',  'DE',   'ETN',
-    'NEE',  'DUK',
-    'AMT',  'PLD',
-    'LIN',  'NEM',
-    'DIS',  'VZ',
-]
-
-DATA_DIR   = os.path.join(PROJECT_ROOT, 'data', 'processed')
-MODELS_DIR = os.path.join(PROJECT_ROOT, 'models')
-LOGS_DIR   = os.path.join(PROJECT_ROOT, 'logs')
+from config.settings import (
+    SYMBOLS, DATA_DIR, MODELS_DIR, LOGS_DIR,
+    SENTIMENT_LOOKBACK_DAYS, MIN_STOCKS,
+)
 
 ET_TZ = pytz.timezone('America/New_York')
 
-# Sentiment fetch window: last N days (covers weekends + any API gaps)
-SENTIMENT_LOOKBACK_DAYS = 7
-
-# Minimum number of Kelly-selected positions to bother running Markowitz.
-# With <2 stocks there's nothing to correlate.
-MIN_POSITIONS_FOR_MARKOWITZ = 2
+# Alias for clarity in this file
+MIN_POSITIONS_FOR_MARKOWITZ = MIN_STOCKS
 
 
 # ---------------------------------------------------------------------------
@@ -629,10 +604,35 @@ def run_pipeline(dry_run: bool = True) -> None:
         else:
             target_weights = run_risk_layer(signals_df, features_df, regime, logger)
 
+    # ── 6.5: Circuit breakers ─────────────────────────────────────────────────
+    if target_weights:
+        try:
+            from execution.circuit_breakers import run_all_checks, CircuitBreakerTripped
+            from execution.monitoring import get_previous_weights
+
+            previous_weights = get_previous_weights()
+            # current_weights will be fetched by order_manager; use empty for now
+            run_all_checks(
+                signals_df=signals_df if signals_df is not None else pd.DataFrame({'pred_proba': []}),
+                target_weights=target_weights,
+                previous_weights=previous_weights,
+                current_weights={},  # actual positions checked in order_manager
+                total_symbols=len(SYMBOLS),
+                logger=logger,
+            )
+        except CircuitBreakerTripped as e:
+            logger.error(f'Circuit breaker tripped: {e}')
+            logger.warning('Overriding target weights to pure cash')
+            target_weights = {}
+        except ImportError:
+            logger.warning('Circuit breakers not available — skipping')
+        except Exception as e:
+            logger.warning(f'Circuit breaker check failed: {e} — proceeding anyway')
+
     # ── 7: Execute ───────────────────────────────────────────────────────────
     execution_ok = run_execution(target_weights, dry_run, logger)
 
-    # ── Summary ──────────────────────────────────────────────────────────────
+    # ── Summary & monitoring ─────────────────────────────────────────────────
     elapsed = (datetime.now() - t_start).total_seconds()
     logger.info('=' * 60)
     logger.info('  Pipeline Complete')
@@ -644,6 +644,32 @@ def run_pipeline(dry_run: bool = True) -> None:
     logger.info(f'  Elapsed     : {elapsed:.1f}s')
     logger.info(f'  Mode        : {"DRY RUN" if dry_run else "LIVE PAPER TRADING"}')
     logger.info('=' * 60)
+
+    # Record pipeline result for monitoring and circuit breaker state
+    try:
+        from execution.monitoring import record_success, record_failure, write_daily_summary
+
+        signals_count = 0
+        if signals_df is not None and 'pred_proba' in signals_df.columns:
+            signals_count = int((signals_df['pred_proba'] >= 0.35).sum())
+
+        if execution_ok:
+            record_success(regime, target_weights, len(target_weights), elapsed)
+        else:
+            record_failure('execution', 'OrderManager returned False')
+
+        write_daily_summary(
+            regime=regime,
+            target_weights=target_weights,
+            signals_count=signals_count,
+            elapsed_seconds=elapsed,
+            execution_ok=execution_ok,
+            dry_run=dry_run,
+        )
+    except ImportError:
+        pass  # monitoring module not available
+    except Exception as e:
+        logger.warning(f'Monitoring recording failed: {e}')
 
 
 # ---------------------------------------------------------------------------

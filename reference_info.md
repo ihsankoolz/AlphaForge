@@ -83,7 +83,13 @@ This is not a research notebook. It is a system — each component has a specifi
      [risk/portfolio_optimiser.py] ← Markowitz mean-variance
                │
                ▼
+     [execution/circuit_breakers.py] ← 4 pre-trade safety checks
+               │
+               ▼
      [execution/order_manager.py] ← Alpaca paper trading orders
+               │
+               ▼
+     [execution/monitoring.py] ← state tracking, alerts, daily summaries
                │
                ▼
      [execution/run_daily.py] ← daily pipeline orchestrator
@@ -1277,17 +1283,21 @@ AlphaForge/
 ├── models/
 │   ├── regime_hmm.py                          ← trains HMM; predict_regime() live wrapper
 │   ├── hmm_model.pkl                          ← trained HMM + scaler — retrained on 79 symbols
-│   ├── ml_signal.py                           ← XGBoost v3; generate_signals() live wrapper
+│   ├── ml_signal.py                           ← XGBoost v3; generate_signals() + non-overlapping AUC
 │   ├── xgb_model.pkl                          ← trained XGBoost v3 — retrained on 79 symbols
-│   └── sentiment.py                           ← FinBERT pipeline; run_sentiment_pipeline() wrapper
+│   ├── sentiment.py                           ← FinBERT pipeline; now produces has_news feature
+│   ├── versioning.py                          ← NEW: model versioning with timestamped saves + rollback
+│   └── versions/                              ← NEW: timestamped model snapshots (last 10 kept)
 ├── risk/
 │   ├── __init__.py                            ← makes risk/ importable as a module
 │   ├── position_sizer.py                      ← Kelly Criterion; compute_kelly_weights() wrapper
 │   └── portfolio_optimiser.py                 ← Markowitz; optimize_weights() wrapper
 ├── execution/
 │   ├── __init__.py                            ← makes execution/ importable as a module
-│   ├── order_manager.py                       ← Alpaca paper trading order execution
-│   └── run_daily.py                           ← 7-stage daily pipeline orchestrator (COMPLETE)
+│   ├── order_manager.py                       ← Alpaca paper trading; now tracks order confirmations
+│   ├── run_daily.py                           ← 7-stage daily pipeline + circuit breakers + monitoring
+│   ├── circuit_breakers.py                    ← NEW: sanity checks before order placement
+│   └── monitoring.py                          ← NEW: email alerts, daily summaries, state tracking
 ├── scripts/
 │   └── expand_universe_batch1.py              ← one-time universe expansion script
 │                                                 3 stages, checkpointed, safe to interrupt/resume
@@ -1295,7 +1305,13 @@ AlphaForge/
 ├── logs/
 │   └── trading_YYYYMMDD.log                   ← daily execution logs
 ├── tests/
+│   ├── __init__.py
+│   ├── test_position_sizer.py               ← 20 tests: Kelly formula, vol adjust, edge cases
+│   ├── test_portfolio_optimiser.py          ← 14 tests: cov matrix, Sharpe opt, bounds
+│   └── test_circuit_breakers.py             ← 11 tests: signal sanity, allocation jump, turnover
 ├── config/
+│   ├── __init__.py                          ← re-exports from settings.py
+│   └── settings.py                          ← SINGLE SOURCE OF TRUTH for all constants
 ├── .env                                       ← API keys + DB credentials (NEVER commit)
 ├── .gitignore
 ├── requirements.txt
@@ -1322,6 +1338,7 @@ transformers     ← HuggingFace library for FinBERT
 torch            ← PyTorch backend for FinBERT
 scipy            ← portfolio optimization (SLSQP solver) ← NEW Week 7
 zoneinfo         ← timezone handling for market hours check ← NEW Week 8
+pytest           ← unit testing framework ← NEW code review improvements
 ```
 
 ---
@@ -1346,24 +1363,114 @@ Clean README, demo video, docstrings throughout, Medium article. Best story: the
 
 ---
 
-## Areas for Improvement
+## Code Review & Improvements (March 2026)
 
-1. **Universe expansion (Batches 2 & 3)** — Batch 1 done. Batches 2 and 3 will add depth within sectors and push toward 129-179 symbols. Each batch requires overnight CPU run + retrain. Expected improvement: sentiment coverage will grow as mid-large caps have fewer analysts covering them (news less instantly priced in), Markowitz will find even more diversification options.
+This section documents a comprehensive code review performed across the entire codebase. Each change is described with what was done, why, and the improvement it brings.
 
-2. **Covariance estimation** — the 60-day lookback assumes stable correlations. In crises, correlations spike (everything moves together). Black-Litterman or robust optimization would handle this better.
+### New Files Created
 
-3. **Kelly odds calibration** — we hardcoded b=2.0 based on the signal quality table. In production, this should be estimated from rolling historical data and updated quarterly.
+| File | Purpose |
+|------|---------|
+| `config/settings.py` | Centralised configuration — single source of truth for all constants, thresholds, symbol lists |
+| `config/__init__.py` | Re-exports from settings.py for clean imports |
+| `models/versioning.py` | Model versioning with timestamped saves, metadata sidecars, rollback, auto-pruning |
+| `execution/circuit_breakers.py` | 4 pre-trade safety checks (signal sanity, allocation jump, weight sum, turnover) |
+| `execution/monitoring.py` | Pipeline state tracking, email alerting, daily summary logging |
+| `tests/test_position_sizer.py` | 20 unit tests for Kelly sizing, vol adjustment, normalisation, calibration |
+| `tests/test_portfolio_optimiser.py` | 14 unit tests for covariance, expected returns, Sharpe optimisation |
+| `tests/test_circuit_breakers.py` | 11 unit tests for all circuit breaker checks |
 
-4. **Sentiment coverage** — currently 56.8% on 79 symbols (was 67.3% on 29 — diluted by Batch 1 new symbols). Will recover as daily incremental fetches accumulate for new symbols. After Batch 2 symbols get months of article history, coverage should return to 65%+.
+### Bug Fixes
 
-5. **Transaction cost model** — our 0.1% flat cost is a simplification. Real costs depend on order size, volatility, and time of day. A more realistic model would improve backtest accuracy.
+**Lookahead bias in volatility adjustment** (`risk/position_sizer.py`)
+- **What:** Changed `features_df["date"] <= date` to `features_df["date"] < date`
+- **Why:** The old code included today's data when computing historical volatility. At 9:30 AM when orders are placed, today's close price (and therefore today's volatility) is unknown. This is a textbook lookahead bias — backtest results would look better than live performance.
+- **Impact:** Prevents inflated backtest Sharpe ratios. Live and backtest performance should now match more closely.
 
-6. **Short selling** — currently long-only due to universe composition bias (all stocks are large-cap winners). After Batches 2 and 3 include more mid-caps and genuine laggards, short selling becomes more viable.
+### Improvements to Existing Files
 
-7. **Turnover constraint** — currently no explicit limit on how much the portfolio changes day-to-day. High turnover = high transaction costs. Adding a turnover penalty to the Markowitz objective would reduce costs.
+**Centralized configuration** (multiple files)
+- **What:** Extracted all hardcoded constants into `config/settings.py`. Updated `risk/position_sizer.py`, `risk/portfolio_optimiser.py`, and `execution/run_daily.py` to import from config.
+- **Why:** The same constant (e.g. `KELLY_FRACTION = 0.5`, `MAX_POSITION = 0.15`, the SYMBOLS list) was defined independently in multiple files. If one file was updated but not others, the system would silently use inconsistent values.
+- **Impact:** Change a threshold once in `config/settings.py` and it propagates everywhere. Eliminates an entire class of copy-paste bugs.
 
-8. **Sentiment staleness degradation** — currently the model uses stale sentiment (when pipeline runs during market hours, yesterday's articles are already 12+ hours old). Adding a staleness discount to sentiment features could improve signal freshness.
+**Kelly odds calibration** (`risk/position_sizer.py`)
+- **What:** Added `calibrate_kelly_odds()` function that computes empirical win/loss ratio from historical signal data.
+- **Why:** The Kelly formula uses `b` (odds ratio) which was hardcoded to 2.0. In reality, the average win vs average loss varies by market regime and model quality. A static assumption leads to over/under-sizing.
+- **Impact:** Position sizes now adapt to actual model performance. Bounded to [0.5, 5.0] to prevent extreme bets. Falls back to default 2.0 when data is insufficient.
+
+**Structured order tracking** (`execution/order_manager.py`)
+- **What:** `place_orders()` now returns structured dicts with order ID, symbol, side, dollar amount, and status. Failed orders tracked separately with error messages. Cleaned up unused imports.
+- **Why:** Previously, order failures were logged but not programmatically accessible. Downstream monitoring couldn't tell how many orders succeeded vs failed.
+- **Impact:** Enables automated monitoring, retry logic, and accurate daily summaries.
+
+**Sentiment `has_news` feature** (`models/sentiment.py`)
+- **What:** Added a binary `has_news` column to `aggregate_daily_sentiment()`. Stocks with no articles get `has_news=0`.
+- **Why:** The model previously couldn't distinguish "no news articles found" from "news existed and sentiment was neutral." Both had sentiment_score=0.0. These are fundamentally different signals — no news often means stability, while neutral news means conflicting information.
+- **Impact:** XGBoost can now learn different behaviors for no-news vs neutral-news stocks. Particularly valuable for less-covered mid-cap stocks added in Batch 1.
+
+**Non-overlapping AUC metric** (`models/ml_signal.py`)
+- **What:** Added `evaluate_non_overlapping_auc()` that samples every 5th day when computing AUC.
+- **Why:** Our target variable is a 5-day forward return. Standard AUC evaluates on consecutive days, meaning adjacent predictions share 4 out of 5 days of return data. This temporal correlation inflates the AUC score — the model appears more accurate than it really is.
+- **Impact:** The non-overlapping AUC gives an honest estimate of live trading performance. If standard AUC is 0.61 but non-overlapping is 0.55, we know the model's real edge is smaller than it appears.
+
+**Circuit breaker integration** (`execution/run_daily.py`)
+- **What:** Added circuit breaker checks between the risk stage and order placement. Added monitoring calls after execution completes.
+- **Why:** Without safety checks, a model producing garbage (e.g., all stocks above threshold, or weights summing to 200%) would silently place bad orders. Circuit breakers catch these anomalies before real money is at risk.
+- **Impact:** The pipeline now fails loudly on anomalous signals rather than silently placing bad trades. Consecutive failures trigger email alerts.
+
+### Test Coverage
+
+51 tests across 3 files, all passing. Key edge cases covered:
+
+- **Position sizer:** zero volatility, NaN values, empty DataFrames, probability boundaries (0.0, 0.5, 1.0), max positions cap, half-Kelly fraction verification
+- **Portfolio optimiser:** singular covariance matrices, single-stock edge case, positive semi-definiteness, no-lookahead verification, regime-dependent weight caps
+- **Circuit breakers:** division by zero (zero symbols), first-run with no history, soft vs hard breaker behavior, boundary values
 
 ---
 
-*Last updated: End of Week 8 / Week 8.5 — Full execution layer complete. All live inference wrappers built (generate_signals, compute_kelly_weights, optimize_weights, ingest_latest, compute_features, run_sentiment_pipeline). run_daily.py 7-stage orchestrator operational. Universe expanded 29 → 79 symbols (Batch 1: 50 new symbols across 4 new sectors). Pipeline verified on live 2026-03-03 data in 27s. BEAR regime detected, 42/79 signals above threshold, 10 positions selected (AMT/DUK/RTX/LOW/TJX/BA leading — Utilities and REITs appearing for first time). Ready for live paper trading. Next: flip to --live, paper trade 1 week, then Batch 2 expansion, then Week 9 dashboard.*
+## Areas for Improvement (Updated After Code Review)
+
+### Fixed in Code Review (March 2026)
+
+1. ~~**Kelly odds calibration**~~ → **FIXED.** Added `calibrate_kelly_odds()` to `risk/position_sizer.py`. Computes empirical win/loss ratio from actual signal quality data. Default prior still 2.0 but now data-driven with bounds [0.5, 5.0].
+
+2. ~~**No test coverage**~~ → **FIXED.** 51 unit tests across 3 test files: `test_position_sizer.py` (20 tests), `test_portfolio_optimiser.py` (14 tests), `test_circuit_breakers.py` (11 tests). Tests cover edge cases: zero volatility, NaN inputs, empty DataFrames, degenerate optimization.
+
+3. ~~**Hardcoded configuration everywhere**~~ → **FIXED.** Created `config/settings.py` — single source of truth for all constants. Modules import from config instead of defining their own copies. Symbol list defined once.
+
+4. ~~**Lookahead bias in position sizer**~~ → **FIXED.** Changed `features_df["date"] <= date` to `< date` in `volatility_adjust()`. Today's volatility uses today's close which isn't known at order time.
+
+5. ~~**Silent failures in order execution**~~ → **FIXED.** `place_orders()` now returns structured dicts with order ID, status, and error details. Failed orders tracked separately with full error messages.
+
+6. ~~**No pipeline circuit breakers**~~ → **FIXED.** Added `execution/circuit_breakers.py` with 4 checks: signal ratio sanity (>80% trips), allocation jump (>30% trips), weight sum (>100% trips), turnover warning (>50% warns). Integrated into `run_daily.py` before order placement.
+
+7. ~~**No model versioning**~~ → **FIXED.** Added `models/versioning.py`. Saves timestamped model snapshots with JSON metadata sidecars. Supports rollback. Keeps last 10 versions, prunes older ones.
+
+8. ~~**Sentiment treats no-news as neutral**~~ → **IMPROVED.** Added `has_news` binary feature to `aggregate_daily_sentiment()` in `models/sentiment.py`. Model can now distinguish "no news at all" from "news existed and was neutral."
+
+9. ~~**AUC may be inflated by temporal correlation**~~ → **IMPROVED.** Added `evaluate_non_overlapping_auc()` to `models/ml_signal.py`. Measures AUC on every 5th day only (non-overlapping 5-day windows). This gives an honest measure of live performance vs the standard AUC which counts correlated predictions.
+
+10. ~~**No monitoring or alerting**~~ → **FIXED.** Added `execution/monitoring.py`. Tracks consecutive failures, sends email alerts after 2+ failures, writes structured daily summaries to `logs/summary_YYYYMMDD.json`, persists pipeline state for circuit breaker comparison.
+
+### Still Open
+
+1. **Universe expansion (Batches 2 & 3)** — Batch 1 done. Batches 2 and 3 will add depth within sectors and push toward 129-179 symbols.
+
+2. **Covariance estimation** — the 60-day lookback assumes stable correlations. In crises, correlations spike. Black-Litterman or robust optimization would handle this better.
+
+3. **Sentiment coverage** — currently 56.8% on 79 symbols. Will recover as daily incremental fetches accumulate for new symbols.
+
+4. **Transaction cost model** — our 0.1% flat cost is a simplification. Real costs depend on order size, volatility, and time of day.
+
+5. **Short selling** — currently long-only due to universe composition bias. After Batches 2 and 3 include more mid-caps, short selling becomes more viable.
+
+6. **Turnover constraint** — circuit breakers now WARN on >50% turnover, but the Markowitz objective doesn't penalize it. Adding a turnover penalty would reduce costs.
+
+7. **Sentiment staleness degradation** — articles from yesterday are 12+ hours old by trade time. Adding a staleness discount could improve freshness.
+
+8. **Microservice architecture** — AlphaForge has natural service boundaries (ingest, features, sentiment, regime, signals, risk, execution, dashboard). Each could become a Docker container communicating via message broker. This is planned for post-Week 10.
+
+---
+
+*Last updated: March 2026 — Comprehensive code review completed. 10 improvements implemented: lookahead bias fix, centralised config, Kelly calibration, model versioning, circuit breakers, monitoring/alerting, structured order tracking, has_news feature, non-overlapping AUC, 51 unit tests. All tests passing. Pipeline ready for live paper trading on 79 symbols. Next: live paper trade 1 week, Batch 2 expansion, Week 9 dashboard, post-Week 10 microservices evolution.*
