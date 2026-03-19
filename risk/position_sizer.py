@@ -22,16 +22,10 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ── CONSTANTS ────────────────────────────────────────────────────────────────
-
-KELLY_FRACTION   = 0.5    # half-Kelly — standard safety buffer against
-                           # estimation error in probability scores
-MIN_PROB         = 0.35    # below this threshold = no position (same as ml_signal.py)
-MAX_POSITION     = 0.15    # single stock cap at 15% of portfolio — prevents
-                           # one high-confidence pick from dominating
-VOL_LOOKBACK     = 20      # days of history to estimate stock volatility
-VOL_TARGET       = 0.01    # target 1% daily vol contribution per position
-                           # (roughly annualises to ~16% vol per position)
+from config.settings import (
+    KELLY_FRACTION, KELLY_ODDS, MIN_PROB, MAX_POSITION,
+    VOL_LOOKBACK, VOL_TARGET, MAX_POSITIONS,
+)
 
 
 # ── 1. KELLY SIZING ──────────────────────────────────────────────────────────
@@ -62,7 +56,7 @@ def kelly_weights(pred_proba: pd.Series) -> pd.Series:
     Returns:
         Series of raw Kelly weights (before vol adjustment or normalisation)
     """
-    b = 2.0  # odds: winners average 2x the size of losers
+    b = KELLY_ODDS  # odds: winners vs losers ratio (calibrated from data)
 
     # Only compute Kelly for stocks above the signal threshold
     active = pred_proba[pred_proba > MIN_PROB].copy()
@@ -117,9 +111,10 @@ def volatility_adjust(kelly_w: pd.Series,
         return kelly_w
 
     # Get volatility for the stocks we're trading today
-    # Use the most recent available vol estimate up to (not including) today
-    # to avoid lookahead bias
-    hist = features_df[features_df["date"] <= date]
+    # Use the most recent available vol estimate STRICTLY BEFORE today
+    # to avoid lookahead bias (today's vol uses today's close which
+    # isn't known at order time — we trade at market open)
+    hist = features_df[features_df["date"] < date]
 
     adjusted = {}
     for symbol in kelly_w.index:
@@ -146,7 +141,7 @@ def volatility_adjust(kelly_w: pd.Series,
 # ── 3. NORMALISE & CAP ───────────────────────────────────────────────────────
 
 def normalise_weights(weights: pd.Series,
-                      max_positions: int = 10) -> pd.Series:
+                      max_positions: int = MAX_POSITIONS) -> pd.Series:
     """
     Take raw weights and produce final allocations that:
       - Cap any single position at MAX_POSITION (15%)
@@ -266,7 +261,7 @@ def diagnose_sizer(signals_df: pd.DataFrame,
                 continue
             prob  = row["pred_proba"].iloc[0]
             # Recompute raw kelly for display
-            b = 2.0
+            b = KELLY_ODDS
             kelly_raw = ((prob * b - (1 - prob)) / b) * KELLY_FRACTION
             print(f"  {symbol:<8} {prob:>11.4f} {kelly_raw:>10.4f} {w:>12.4f}")
 
@@ -315,7 +310,58 @@ def compute_kelly_weights(
 
     return weights_series.to_dict()
 
-# ── 6. MAIN — RUN STANDALONE TO TEST ─────────────────────────────────────────
+# ── 6. EMPIRICAL KELLY ODDS CALIBRATION ──────────────────────────────────────
+
+def calibrate_kelly_odds(signals_df: pd.DataFrame) -> float:
+    """
+    Compute Kelly odds empirically from actual signal quality data.
+
+    Kelly odds = avg_win / avg_loss among stocks above the signal threshold.
+
+    The signal quality table showed:
+        Very High bucket: +4.42% avg 5d return
+        Very Low bucket:  -3.53% avg 5d return
+
+    But the correct calibration uses ACTUAL win/loss ratios from the
+    pred_proba > MIN_PROB population, not extreme buckets.
+
+    Args:
+        signals_df: DataFrame with columns [pred_proba, forward_return_5d]
+
+    Returns:
+        Calibrated odds ratio (avg_win / avg_loss). Falls back to
+        KELLY_ODDS default if insufficient data.
+    """
+    above = signals_df[signals_df["pred_proba"] > MIN_PROB].copy()
+
+    if len(above) < 100:
+        print(f"  Insufficient data for calibration ({len(above)} rows) "
+              f"— using default odds {KELLY_ODDS}")
+        return KELLY_ODDS
+
+    winners = above[above["forward_return_5d"] > 0]["forward_return_5d"]
+    losers  = above[above["forward_return_5d"] < 0]["forward_return_5d"].abs()
+
+    if losers.empty or losers.mean() == 0:
+        print(f"  No losing trades found — using default odds {KELLY_ODDS}")
+        return KELLY_ODDS
+
+    empirical_odds = winners.mean() / losers.mean()
+
+    # Sanity bounds: odds below 0.5 or above 5.0 are suspect
+    empirical_odds = max(0.5, min(5.0, empirical_odds))
+
+    win_rate = len(winners) / len(above)
+    print(f"  Kelly odds calibration:")
+    print(f"    Avg winner: +{winners.mean():.2%}")
+    print(f"    Avg loser:  -{losers.mean():.2%}")
+    print(f"    Win rate:   {win_rate:.1%}")
+    print(f"    Empirical odds: {empirical_odds:.2f} (default was {KELLY_ODDS})")
+
+    return empirical_odds
+
+
+# ── 7. MAIN — RUN STANDALONE TO TEST ─────────────────────────────────────────
 
 if __name__ == "__main__":
     import os

@@ -78,6 +78,7 @@ def load_data():
         "sentiment_neg_pct": 0.0,
         "article_count":     0.0,   # no coverage
         "sentiment_3d":      0.0,   # neutral rolling average
+        "has_news":          0.0,   # no news indicator
     }
     for col, fill_val in sentiment_fill.items():
         if col in df.columns:
@@ -119,6 +120,8 @@ FEATURE_COLS = [
     "sentiment_neg_pct", # % of articles classified negative
     "article_count",     # news volume — high count = more attention
     "sentiment_3d",      # 3-day rolling avg sentiment — smooths single-day noise
+    # News presence indicator — distinguishes "no news" from "neutral news"
+    "has_news",          # binary: 1.0 if any articles that day, 0.0 if none
 ]
 
 # ── 3. WALK-FORWARD VALIDATION ───────────────────────────────────────────────
@@ -246,6 +249,63 @@ def evaluate_signals(predictions_df):
     print(f"\n  Overall AUC target: >0.83 (beat v2 baseline)")
     print(f"  Baseline top-quartile rate: {df['target'].mean():.3f} (should be ~0.25)")
     print("==============================================================\n")
+
+# ── 4b. NON-OVERLAPPING AUC VALIDATION ──────────────────────────────────────
+
+def evaluate_non_overlapping_auc(predictions_df):
+    """
+    Measure AUC on NON-OVERLAPPING 5-day blocks only.
+
+    The standard AUC (0.83) is computed on ALL predictions, but adjacent
+    predictions are correlated because 5-day return windows overlap.
+    Day T and day T+1 share 4 of 5 forward days — they're not independent.
+
+    This inflates AUC because the model gets "credit" for correlated
+    predictions that are essentially the same signal.
+
+    Fix: sample every 5th day so windows don't overlap. This gives an
+    honest AUC on truly independent predictions.
+
+    Expected result: AUC drops from ~0.83 to ~0.60-0.70 — still good
+    but more representative of actual live performance.
+    """
+    df = predictions_df.copy()
+    df = df.sort_values("date")
+
+    # Get unique dates and sample every 5th
+    unique_dates = sorted(df["date"].unique())
+    non_overlapping_dates = unique_dates[::5]
+
+    df_no = df[df["date"].isin(non_overlapping_dates)]
+
+    if len(df_no) < 50:
+        print("  Insufficient data for non-overlapping AUC — skipping")
+        return
+
+    try:
+        auc_no = roc_auc_score(df_no["target"], df_no["pred_proba"])
+    except Exception:
+        auc_no = 0.5
+
+    auc_all = roc_auc_score(df["target"], df["pred_proba"])
+
+    print("\n========== NON-OVERLAPPING AUC VALIDATION ==========")
+    print(f"  Standard AUC (all predictions):        {auc_all:.3f}")
+    print(f"  Non-overlapping AUC (every 5th day):   {auc_no:.3f}")
+    print(f"  Difference:                            {auc_all - auc_no:+.3f}")
+    print(f"  Predictions used: {len(df_no):,} / {len(df):,} "
+          f"({len(df_no)/len(df):.1%})")
+    if auc_no < auc_all - 0.05:
+        print(f"  ⚠ Significant drop — standard AUC is inflated by temporal "
+              f"correlation")
+        print(f"    The non-overlapping AUC ({auc_no:.3f}) is the more honest "
+              f"measure of live performance")
+    else:
+        print(f"  ✓ Minimal drop — AUC is robust to temporal correlation")
+    print("=====================================================\n")
+
+    return auc_no
+
 
 # ── 5. FEATURE IMPORTANCE ────────────────────────────────────────────────────
 
@@ -429,6 +489,7 @@ def generate_signals(
         "sentiment_neg_pct": 0.0,
         "article_count":     0.0,
         "sentiment_3d":      0.0,
+        "has_news":          0.0,
     }
     for col, fill_val in sentiment_fills.items():
         if col not in df.columns:
@@ -491,6 +552,7 @@ if __name__ == "__main__":
     print(f"Mean AUC:      {scores['auc'].mean():.3f}  (v2 baseline: 0.829)")
 
     evaluate_signals(predictions)
+    evaluate_non_overlapping_auc(predictions)
     print_feature_importance(df)
 
     signals = predictions_to_signals(predictions)
