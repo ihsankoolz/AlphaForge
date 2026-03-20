@@ -5,7 +5,7 @@ execution/run_daily.py
 AlphaForge daily pipeline orchestrator.
 
 Runs once each morning, scheduled via Windows Task Scheduler:
-    9:25 AM ET  → script starts, ingest + compute begin
+    9:27 AM ET  → script starts, ingest + compute begin
     9:30 AM ET  → market opens, orders placed
     ~9:35 AM ET → script exits normally
 
@@ -25,7 +25,7 @@ Usage:
 Scheduling (Windows Task Scheduler):
     Program  : python
     Arguments: C:\\...\\AlphaForge\\execution\\run_daily.py --live
-    Trigger  : Daily, 9:25 AM ET (weekdays only)
+    Trigger  : Daily, 9:27 AM ET (weekdays only)
 
 -------------------------------------------------------------------------------
 EXPECTED MODULE INTERFACES

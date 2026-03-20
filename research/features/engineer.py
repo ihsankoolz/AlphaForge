@@ -187,7 +187,7 @@ def compute_features(symbols: list) -> pd.DataFrame:
 
     Recomputes full history every day because rolling windows
     (60-day correlation, 20-day volatility) need full lookback to
-    be valid. Takes ~10-15s — fine for a 9:25 AM pipeline.
+    be valid. Takes ~10-15s — fine for a 9:27 AM pipeline.
 
     The symbols parameter is kept for interface compatibility but
     unused — engineer_features() loads all symbols in TimescaleDB.

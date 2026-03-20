@@ -820,7 +820,7 @@ Alpaca offers a paper trading account — simulated brokerage with $100,000 fake
 
 It runs once per day and exits — it is NOT a while loop. Flow:
 ```
-9:25 AM → run_daily.py starts
+9:27 AM → run_daily.py starts
 9:30 AM → market opens, orders placed
 9:35 AM → script finishes and exits
 ```
@@ -887,7 +887,7 @@ Everything built in Weeks 1-7 was research/training code — it ran on historica
 
 ### The 7-Stage Pipeline (run_daily.py)
 
-`execution/run_daily.py` runs every weekday morning at 9:25 AM ET and orchestrates all 7 stages in sequence:
+`execution/run_daily.py` runs every weekday morning at 9:27 AM ET and orchestrates all 7 stages in sequence:
 
 ```
 Stage 1 — INGEST:       fetch yesterday's prices → TimescaleDB
@@ -945,7 +945,7 @@ Fetches only the last 5 days of OHLCV data (not full history). Key parameter: `f
 Recomputes the entire `features_daily.parquet` from scratch every day, loading full history from TimescaleDB.
 
 **Why full recompute instead of incremental:**
-Rolling windows (60-day correlation, 20-day volatility, 14-day RSI) require full lookback. If you only appended today's row, the rolling calculations at the boundary would be wrong. Full recompute takes ~1-2 seconds for 79 symbols — acceptable for a 9:25 AM pipeline.
+Rolling windows (60-day correlation, 20-day volatility, 14-day RSI) require full lookback. If you only appended today's row, the rolling calculations at the boundary would be wrong. Full recompute takes ~1-2 seconds for 79 symbols — acceptable for a 9:27 AM pipeline.
 
 ### First Successful Live Dry Runs
 
@@ -1640,11 +1640,11 @@ The pipeline runs 7 stages sequentially: Ingest → Features → Sentiment → R
 ```
 Program:    C:\...\AlphaForge\venv\Scripts\python.exe
 Arguments:  C:\...\AlphaForge\execution\run_daily.py --live
-Trigger:    Daily, 9:25 AM ET (weekdays only)
+Trigger:    Daily, 9:27 AM ET (weekdays only)
 Start in:   C:\...\AlphaForge
 ```
 
-The script starts at 9:25 AM, computes signals, and places orders at ~9:30 AM when the market opens. Paper trading has been running this way for 3+ weeks (11 sessions logged Feb 28 — Mar 19, 2026) on the 79-symbol universe.
+The script starts at 9:27 AM, computes signals, and places orders at ~9:30 AM when the market opens. Paper trading has been running this way for 3+ weeks (11 sessions logged Feb 28 — Mar 19, 2026) on the 79-symbol universe.
 
 **Run backtests:**
 ```bash
