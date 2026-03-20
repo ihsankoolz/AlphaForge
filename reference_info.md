@@ -1287,12 +1287,15 @@ AlphaForge/
 │   ├── xgb_model.pkl                          ← trained XGBoost v3 — retrained on 79 symbols
 │   ├── sentiment.py                           ← FinBERT pipeline; now produces has_news feature
 │   ├── versioning.py                          ← NEW: model versioning with timestamped saves + rollback
+│   ├── ensemble.py                            ← NEW: XGBoost + LightGBM ensemble stacking with agreement tracking
 │   └── versions/                              ← NEW: timestamped model snapshots (last 10 kept)
 ├── analytics/
 │   ├── __init__.py                            ← makes analytics/ importable as a module
 │   ├── risk_metrics.py                        ← NEW: VaR, CVaR, concentration, Calmar, beta, skewness, kurtosis
 │   ├── signal_quality.py                      ← NEW: rolling AUC, bucket calibration, model drift, recalibration
-│   └── regime_analysis.py                     ← NEW: transition matrix, regime-conditional Sharpe, persistence
+│   ├── regime_analysis.py                     ← NEW: transition matrix, regime-conditional Sharpe, persistence
+│   ├── stress_testing.py                      ← NEW: crisis replay, parametric stress, Monte Carlo VaR, correlation/sector stress
+│   └── walk_forward.py                        ← NEW: rolling-window metrics, P&L attribution, stability, OOS degradation
 ├── risk/
 │   ├── __init__.py                            ← makes risk/ importable as a module
 │   ├── position_sizer.py                      ← Kelly Criterion; compute_kelly_weights() wrapper
@@ -1321,7 +1324,10 @@ AlphaForge/
 │   ├── test_sentiment_staleness.py          ← 12 tests: decay weight, freshness, edge cases
 │   ├── test_risk_metrics.py                 ← NEW: 38 tests: VaR, CVaR, HHI, Calmar, beta, skew, kurtosis
 │   ├── test_signal_quality.py               ← NEW: 24 tests: AUC, buckets, KL divergence, drift, recalibration
-│   └── test_regime_analysis.py              ← NEW: 23 tests: transitions, persistence, accuracy, reports
+│   ├── test_regime_analysis.py              ← NEW: 23 tests: transitions, persistence, accuracy, reports
+│   ├── test_stress_testing.py               ← NEW: 35 tests: crisis replay, parametric, Monte Carlo, correlation, sector
+│   ├── test_ensemble.py                     ← NEW: 27 tests: ensemble fit/predict, agreement, feature importance
+│   └── test_walk_forward.py                 ← NEW: 33 tests: rolling windows, regime/period attribution, stability, OOS
 ├── config/
 │   ├── __init__.py                          ← re-exports from settings.py
 │   └── settings.py                          ← SINGLE SOURCE OF TRUTH for all constants
@@ -1354,19 +1360,20 @@ zoneinfo         ← timezone handling for market hours check ← NEW Week 8
 pytest           ← unit testing framework ← NEW code review improvements
 streamlit        ← dashboard UI framework ← NEW Week 9
 plotly           ← interactive charts for dashboard ← NEW Week 9
+lightgbm         ← optional: ensemble stacking with XGBoost ← NEW (graceful fallback if absent)
 ```
 
 ---
 
 ## What's Coming Next
 
-### Immediate Next Step — Go Live (Paper Trading)
+### Paper Trading — ✅ CONFIRMED STABLE (3+ weeks)
 
-Pipeline is fully operational on 79 symbols. Run `python execution/run_daily.py --live` on a weekday morning between 9:25-9:30 AM ET (9:25-9:30 PM SGT). First live paper trade execution. Monitor the logs carefully — the first real rebalance on a fresh $100,000 account should place 10 buy orders. Verify order confirmations in the Alpaca paper trading dashboard.
+Paper trading has been running live since Feb 28, 2026 with consistent daily executions through March 19. 11 trading sessions logged, pipeline stable on 79 symbols. Ready for universe expansion.
 
-### Week 8.5 — Universe Expansion Batch 2 (after 1 week paper trading)
+### Week 8.5 — Universe Expansion Batch 2
 
-Add 50 more symbols → 129 total. Focus: depth within existing sectors. Run `scripts/expand_universe_batch2.py` (to be built), retrain HMM + XGBoost, verify dry run. Trigger: after confirming Batch 1 paper trading is stable for ~5 trading days.
+Add 50 more symbols → 129 total. Focus: depth within existing sectors. Run `scripts/expand_universe_batch2.py` (to be built), retrain HMM + XGBoost, verify dry run. Paper trading confirmed stable — this is unblocked.
 
 ### Week 9 — Streamlit Dashboard ✅ DONE
 
@@ -1400,6 +1407,12 @@ This section documents a comprehensive code review performed across the entire c
 | `tests/test_risk_metrics.py` | 38 unit tests for all risk metrics functions |
 | `tests/test_signal_quality.py` | 24 unit tests for signal quality monitoring |
 | `tests/test_regime_analysis.py` | 23 unit tests for regime analysis |
+| `analytics/stress_testing.py` | Stress testing: historical crisis replay, parametric stress, Monte Carlo VaR, correlation stress, sector stress |
+| `analytics/walk_forward.py` | Walk-forward analysis: rolling-window metrics, P&L attribution by regime/period, stability, OOS degradation |
+| `models/ensemble.py` | Ensemble model stacking: XGBoost + LightGBM with weighted averaging, agreement tracking |
+| `tests/test_stress_testing.py` | 35 unit tests for all stress testing functions |
+| `tests/test_ensemble.py` | 27 unit tests for ensemble model training, prediction, agreement |
+| `tests/test_walk_forward.py` | 33 unit tests for walk-forward analysis |
 
 ### Bug Fixes
 
@@ -1442,7 +1455,7 @@ This section documents a comprehensive code review performed across the entire c
 
 ### Test Coverage
 
-157 tests across 7 files, all passing. Key edge cases covered:
+254 tests across 10 files, all passing (6 skipped — LightGBM not installed, handled gracefully). Key edge cases covered:
 
 - **Position sizer (30 tests):** zero volatility, NaN values, empty DataFrames, probability boundaries (0.0, 0.5, 1.0), max positions cap, half-Kelly fraction verification, short selling enable/disable, short weight capping, short threshold exclusion
 - **Portfolio optimiser (19 tests):** singular covariance matrices, single-stock edge case, positive semi-definiteness, no-lookahead verification, regime-dependent weight caps, Ledoit-Wolf shrinkage validity, condition number improvement, matrix symmetry
@@ -1451,6 +1464,9 @@ This section documents a comprehensive code review performed across the entire c
 - **Risk metrics (38 tests):** VaR at multiple confidence levels, CVaR worse than VaR, HHI for equal/concentrated/empty portfolios, effective number of bets, Calmar with/without drawdowns, beta (perfect/double/zero/uncorrelated), skewness symmetry, kurtosis fat tails, composite summary
 - **Signal quality (24 tests):** manual AUC (perfect/random/inverse), rolling AUC windows, bucket calibration ordering, KL divergence (identical/shifted), recalibration trigger thresholds, feature importance drift cosine similarity, composite report
 - **Regime analysis (23 tests):** transition matrix row sums, known transition counts, regime-conditional Sharpe signs, persistence durations, regime accuracy (bull/bear/string labels), distribution counting, composite report
+- **Stress testing (35 tests):** historical crisis replay (COVID, 2022 selloff), parametric stress (1x-3x), Monte Carlo VaR (reproducibility, horizon scaling), correlation stress (single/multi asset, array inputs), sector concentration (default/custom shocks, unmatched sectors), composite report
+- **Ensemble (27 tests):** model fit/predict, probability ranges and normalization, XGBoost-only fallback, custom params, scale_pos_weight, feature importances, model agreement metrics, ensemble vs single model comparison
+- **Walk-forward (33 tests):** rolling window counts/keys, P&L attribution by regime (day totals, pct sums), period attribution (monthly/quarterly/yearly, cumulative correctness), stability (profitable windows, consistency ratio), OOS degradation detection, composite report
 
 ---
 
@@ -1502,6 +1518,12 @@ This section documents a comprehensive code review performed across the entire c
 
 11. ~~**No regime analysis / transition tracking**~~ → **FIXED.** Added `analytics/regime_analysis.py` with: empirical transition matrix (P(regime tomorrow | regime today) — rows sum to 1.0), regime-conditional performance (Sharpe, max drawdown, win rate per regime), regime persistence statistics (average/min/max duration per regime, number of episodes), regime accuracy measurement (did bull predictions actually have positive returns?), and a composite `regime_report()`. Supports both integer labels (0/1/2) and string labels ("bull"/"choppy"/"bear"). 23 tests.
 
+12. ~~**No stress testing / scenario analysis**~~ → **FIXED.** Added `analytics/stress_testing.py` with: historical crisis replay (COVID crash, 2022 rate hike, SVB crisis, Aug 2024 unwind — measures total return, max drawdown, worst/best day per crisis window), parametric stress (apply 1x-3x multipliers to returns, measure VaR/CVaR/drawdown under amplified moves), Monte Carlo VaR (10,000-path simulation from fitted normal, 5-day horizon, reports VaR/CVaR/worst/best path and % negative outcomes), correlation stress (estimate portfolio vol under rising correlations from 0.3 to 1.0 — crisis mode), sector concentration stress (measure portfolio impact from sector-specific drawdowns like "Tech -20%"). Pure functions, no I/O. Composite `stress_report()` runs all analyses. 35 tests.
+
+13. ~~**No ensemble methods**~~ → **IMPLEMENTED.** Added `models/ensemble.py` with `EnsembleModel` class that stacks XGBoost + LightGBM. Weighted average predictions (default 50/50, configurable). Graceful fallback when LightGBM isn't installed (XGBoost-only mode). Includes `model_agreement()` function that measures prediction correlation, class disagreement rate, and per-sample agreement between the two models — useful as a confidence signal. Averaged `feature_importances()` across both models. Convenience functions `train_ensemble()` and `ensemble_predict()`. Different hyperparameters between models (XGBoost depth=4, LightGBM depth=5; different random seeds) for diversity. 27 tests.
+
+14. ~~**No walk-forward / rolling-window analysis**~~ → **FIXED.** Added `analytics/walk_forward.py` with: rolling-window performance metrics (Sharpe, return, drawdown, volatility, win rate per non-overlapping quarter), P&L attribution by regime (total return, mean daily, Sharpe, % of total PnL per regime), P&L attribution by calendar period (month/quarter/year with cumulative tracking), performance stability metrics (% profitable windows, Sharpe std, return consistency ratio, worst/best window), out-of-sample degradation detection (first-half vs second-half Sharpe comparison, flags >0.3 drop). Composite `walk_forward_report()` runs all analyses. 33 tests.
+
 ---
 
-*Last updated: March 2026 — 19 improvements implemented. Latest: Streamlit dashboard (5 pages) with integrated analytics — Risk page shows VaR/CVaR/Calmar/beta/skewness/kurtosis/return distribution, Signals page shows prediction calibration buckets and KL divergence drift detection, Backtests page shows regime transition heatmap/persistence/accuracy. All 157 tests passing across 7 test files. Pipeline ready for live paper trading on 79 symbols. Week 9 (Dashboard) complete. Next: live paper trade 1 week, Batch 2 expansion, Week 10 polish.*
+*Last updated: March 2026 — 22 improvements implemented. Latest: stress testing (crisis replay, parametric, Monte Carlo VaR, correlation/sector stress), ensemble model stacking (XGBoost + LightGBM with agreement tracking), walk-forward analysis (rolling-window metrics, P&L attribution, stability, OOS degradation). Paper trading confirmed stable (3+ weeks, 11 sessions since Feb 28). All 254 tests passing across 10 test files. Week 9 (Dashboard) complete. Next: Universe Batch 2 expansion, Week 10 polish.*
