@@ -48,8 +48,41 @@ SYMBOLS_BATCH1 = [
     "DIS",  "VZ",
 ]
 
+SYMBOLS_BATCH2 = [
+    # Tech / Semiconductors
+    "MRVL", "KLAC", "LRCX", "SNPS", "CDNS",
+    # Cybersecurity
+    "PANW", "CRWD", "ZS",
+    # Cloud / SaaS
+    "DDOG", "SNOW", "TEAM",
+    # Fintech
+    "SQ",   "PYPL", "FIS",  "FISV",
+    # Insurance
+    "PGR",  "TRV",  "MET",  "AIG",
+    # Biotech
+    "VRTX", "REGN", "MRNA", "BIIB",
+    # Medical devices
+    "SYK",  "ZBH",  "EW",   "DXCM",
+    # Hospitality / Delivery
+    "ABNB", "DASH", "CMG",  "YUM",  "DPZ",
+    # Retail
+    "LULU", "ROST",
+    # Defense / Aerospace
+    "NOC",  "GD",   "HWM",  "TDG",
+    # Solar
+    "ENPH", "FSLR",
+    # Midstream energy
+    "WMB",  "KMI",
+    # Materials
+    "FCX",  "APD",  "SHW",
+    # Communications
+    "CMCSA", "T",   "CHTR",
+    # Data center REITs
+    "CCI",  "EQIX",
+]
+
 # Full active universe — modules should import this, not build their own list
-SYMBOLS = SYMBOLS_ORIGINAL + SYMBOLS_BATCH1
+SYMBOLS = SYMBOLS_ORIGINAL + SYMBOLS_BATCH1 + SYMBOLS_BATCH2
 
 # ---------------------------------------------------------------------------
 # Kelly Criterion / Position sizing
