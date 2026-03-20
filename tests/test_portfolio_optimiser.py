@@ -219,5 +219,73 @@ class TestOptimisePortfolio:
         assert w_bear.max() <= MAX_WEIGHT * 0.7 + 0.01
 
 
+class TestLedoitWolfShrinkage:
+    """Tests for Ledoit-Wolf shrinkage covariance estimation."""
+
+    def _make_features(self, symbols, n_days=80):
+        dates = pd.bdate_range("2024-01-01", periods=n_days)
+        rows = []
+        np.random.seed(42)
+        for d in dates:
+            for sym in symbols:
+                rows.append({
+                    "date": d,
+                    "symbol": sym,
+                    "return_1d": np.random.normal(0.001, 0.02),
+                })
+        return pd.DataFrame(rows)
+
+    def test_shrinkage_produces_valid_cov(self):
+        """Ledoit-Wolf should produce a valid positive semi-definite matrix."""
+        symbols = ["AAPL", "MSFT", "GOOGL", "NVDA"]
+        features = self._make_features(symbols)
+        date = features["date"].max() + pd.Timedelta(days=1)
+        cov = build_covariance_matrix(symbols, features, date)
+        assert cov is not None
+        assert cov.shape == (4, 4)
+        eigenvalues = np.linalg.eigvalsh(cov.values)
+        assert all(ev >= -1e-10 for ev in eigenvalues)
+
+    def test_shrinkage_better_conditioned(self):
+        """Shrinkage matrix should have a lower condition number than sample."""
+        # With correlated stocks, sample cov can be ill-conditioned
+        symbols = ["S0", "S1", "S2", "S3", "S4"]
+        dates = pd.bdate_range("2024-01-01", periods=80)
+        rows = []
+        np.random.seed(42)
+        base = np.random.normal(0.001, 0.02, 80)
+        for i, d in enumerate(dates):
+            for j, sym in enumerate(symbols):
+                # Make stocks correlated (base + small noise)
+                ret = base[i] + np.random.normal(0, 0.002)
+                rows.append({"date": d, "symbol": sym, "return_1d": ret})
+        features = pd.DataFrame(rows)
+        date = features["date"].max() + pd.Timedelta(days=1)
+        cov = build_covariance_matrix(symbols, features, date)
+        assert cov is not None
+        cond = np.linalg.cond(cov.values)
+        # Shrinkage should keep condition number reasonable (not infinite)
+        assert cond < 1e6
+
+    def test_shrinkage_diagonal_positive(self):
+        """All diagonal elements (variances) should be strictly positive."""
+        symbols = ["AAPL", "MSFT", "GOOGL"]
+        features = self._make_features(symbols)
+        date = features["date"].max() + pd.Timedelta(days=1)
+        cov = build_covariance_matrix(symbols, features, date)
+        assert cov is not None
+        for sym in symbols:
+            assert cov.loc[sym, sym] > 0
+
+    def test_shrinkage_symmetric(self):
+        """Covariance matrix should be symmetric."""
+        symbols = ["AAPL", "MSFT", "GOOGL"]
+        features = self._make_features(symbols)
+        date = features["date"].max() + pd.Timedelta(days=1)
+        cov = build_covariance_matrix(symbols, features, date)
+        assert cov is not None
+        np.testing.assert_array_almost_equal(cov.values, cov.values.T)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

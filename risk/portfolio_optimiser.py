@@ -21,6 +21,7 @@ Why Markowitz on top of Kelly?
 import pandas as pd
 import numpy as np
 from scipy.optimize import minimize
+from sklearn.covariance import LedoitWolf
 import warnings
 import sys
 import os
@@ -34,6 +35,7 @@ from risk.position_sizer import compute_positions
 from config.settings import (
     COV_LOOKBACK, MIN_WEIGHT, MAX_WEIGHT, RISK_FREE_RATE,
     MIN_STOCKS, MAX_POSITION, TURNOVER_PENALTY_LAMBDA,
+    COV_SHRINKAGE_METHOD,
 )
 
 
@@ -82,8 +84,22 @@ def build_covariance_matrix(symbols: list,
     returns_wide = returns_wide.ffill().dropna()
 
     # Compute annualised covariance matrix
-    # Daily cov × 252 trading days = annualised
-    cov_matrix = returns_wide.cov() * 252
+    if COV_SHRINKAGE_METHOD == "ledoit_wolf":
+        # Ledoit-Wolf shrinkage: shrinks sample covariance toward a structured
+        # target (scaled identity matrix). This is critical because:
+        #   1. Sample covariance is noisy with 60 days and 10+ stocks
+        #   2. In crises, correlations spike — sample cov underestimates this
+        #   3. Shrinkage produces a better-conditioned matrix that the optimizer
+        #      can invert reliably, avoiding extreme weight swings
+        lw = LedoitWolf().fit(returns_wide.values)
+        cov_matrix = pd.DataFrame(
+            lw.covariance_ * 252,  # annualise
+            index=returns_wide.columns,
+            columns=returns_wide.columns,
+        )
+    else:
+        # Raw sample covariance (original method)
+        cov_matrix = returns_wide.cov() * 252
 
     return cov_matrix
 

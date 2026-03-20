@@ -11,6 +11,11 @@ warnings.filterwarnings("ignore")
 
 load_dotenv()
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config.settings import (
+    SENTIMENT_DECAY_HALFLIFE_HOURS, SENTIMENT_MAX_AGE_HOURS,
+)
+
 # ── 1. FETCH NEWS FROM ALPACA ─────────────────────────────────────────────────
 
 def fetch_news_alpaca(symbols, start_date="2020-01-01", end_date="2025-12-31",
@@ -178,27 +183,107 @@ def score_sentiment(texts, finbert, batch_size=32):
 
 # ── 3. AGGREGATE TO DAILY SCORES ─────────────────────────────────────────────
 
+def _compute_staleness_weight(created_at, trade_date):
+    """
+    Compute exponential decay weight for an article based on its age.
+
+    Articles published right before market open are freshest and most
+    relevant. As articles age, their sentiment signal degrades — by the
+    time we trade at 9:30 AM, yesterday's pre-market article is 18+ hours
+    old. The decay function down-weights stale articles so the aggregated
+    sentiment reflects what the market hasn't yet priced in.
+
+    Uses half-life model: weight = 2^(-age_hours / halflife)
+      - At 0 hours old:  weight = 1.0
+      - At 18 hours old: weight = 0.5 (default halflife)
+      - At 36 hours old: weight = 0.25
+      - At 72+ hours old: weight = 0.0 (discarded)
+
+    Args:
+        created_at: article publication timestamp (or date)
+        trade_date: the trading day this article is being aggregated for
+
+    Returns:
+        float weight in [0, 1]
+    """
+    try:
+        if pd.isna(created_at) or pd.isna(trade_date):
+            return 1.0
+
+        created_ts = pd.Timestamp(created_at)
+        trade_ts = pd.Timestamp(trade_date)
+
+        # Assume trading happens at 9:30 AM ET on the trade date
+        # Articles are aggregated for the day they were published
+        # Age = hours between article creation and end of that trading day
+        # For daily aggregation: age relative to the trade_date's market close
+        trade_close = trade_ts + pd.Timedelta(hours=16)  # 4 PM proxy
+        age_hours = (trade_close - created_ts).total_seconds() / 3600.0
+
+        if age_hours < 0:
+            return 1.0  # future article (shouldn't happen, full weight)
+        if age_hours > SENTIMENT_MAX_AGE_HOURS:
+            return 0.0  # too old, discard
+
+        weight = 2.0 ** (-age_hours / SENTIMENT_DECAY_HALFLIFE_HOURS)
+        return weight
+    except Exception:
+        return 1.0  # fallback: full weight if timestamp parsing fails
+
+
 def aggregate_daily_sentiment(scored_df, symbols, all_dates):
     """
     Convert per-article sentiment into per-stock per-day features.
-    
+
     Features we create:
-    - sentiment_mean:    avg sentiment score across all articles that day
+    - sentiment_mean:    weighted avg sentiment score across articles that day
     - sentiment_pos_pct: % of articles that were positive
-    - sentiment_neg_pct: % of articles that were negative  
+    - sentiment_neg_pct: % of articles that were negative
     - article_count:     number of articles (high = more news attention)
     - sentiment_std:     disagreement between articles (high = uncertainty)
-    
+    - sentiment_freshness: avg staleness weight (1.0 = all fresh, 0.5 = aging)
+
+    Staleness degradation: articles are weighted by an exponential decay
+    based on their age. Recent articles count more than stale ones.
+    sentiment_mean uses these weights; other features remain unweighted
+    since they measure distribution properties (% positive, count, std).
+
     For days with no news we fill with 0 (neutral) — absence of news
     is itself a signal worth preserving as a zero rather than NaN.
     """
-    daily = scored_df.groupby(["date", "symbol"]).agg(
-        sentiment_mean    = ("sentiment_score", "mean"),
-        sentiment_std     = ("sentiment_score", "std"),
-        sentiment_pos_pct = ("label", lambda x: (x == "positive").mean()),
-        sentiment_neg_pct = ("label", lambda x: (x == "negative").mean()),
-        article_count     = ("sentiment_score", "count")
+    df = scored_df.copy()
+
+    # Compute staleness weights if timestamp information is available
+    has_timestamps = "created_at" in df.columns
+    if has_timestamps:
+        df["_decay_weight"] = df.apply(
+            lambda r: _compute_staleness_weight(r.get("created_at"), r["date"]),
+            axis=1,
+        )
+    else:
+        # No sub-day timestamps — all articles on same day get equal weight
+        df["_decay_weight"] = 1.0
+
+    # Weighted sentiment mean
+    df["_weighted_score"] = df["sentiment_score"] * df["_decay_weight"]
+
+    daily = df.groupby(["date", "symbol"]).agg(
+        _weighted_score_sum = ("_weighted_score", "sum"),
+        _decay_weight_sum   = ("_decay_weight", "sum"),
+        sentiment_std       = ("sentiment_score", "std"),
+        sentiment_pos_pct   = ("label", lambda x: (x == "positive").mean()),
+        sentiment_neg_pct   = ("label", lambda x: (x == "negative").mean()),
+        article_count       = ("sentiment_score", "count"),
+        sentiment_freshness = ("_decay_weight", "mean"),
     ).reset_index()
+
+    # Compute decay-weighted sentiment mean from aggregated sums
+    daily["sentiment_mean"] = np.where(
+        daily["_decay_weight_sum"] > 0,
+        daily["_weighted_score_sum"] / daily["_decay_weight_sum"],
+        0.0,
+    )
+    daily = daily.drop(columns=["_weighted_score_sum", "_decay_weight_sum"])
 
     # Build full grid of all date × symbol combinations
     date_sym = pd.MultiIndex.from_product(
@@ -211,7 +296,8 @@ def aggregate_daily_sentiment(scored_df, symbols, all_dates):
         "sentiment_std":     0.0,
         "sentiment_pos_pct": 0.0,
         "sentiment_neg_pct": 0.0,
-        "article_count":     0.0
+        "article_count":     0.0,
+        "sentiment_freshness": 0.0,
     })
 
     # Binary indicator: did this stock have ANY news today?

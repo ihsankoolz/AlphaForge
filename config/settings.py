@@ -96,6 +96,7 @@ SENTIMENT_FEATURE_COLS = [
     "sentiment_mean", "sentiment_std",
     "sentiment_pos_pct", "sentiment_neg_pct",
     "article_count", "sentiment_3d",
+    "sentiment_freshness",
 ]
 SENTIMENT_FILL_VALUES = {
     "sentiment_mean":    0.0,
@@ -104,6 +105,7 @@ SENTIMENT_FILL_VALUES = {
     "sentiment_neg_pct": 0.0,
     "article_count":     0.0,
     "sentiment_3d":      0.0,
+    "sentiment_freshness": 0.0,
 }
 
 # ---------------------------------------------------------------------------
@@ -128,6 +130,25 @@ FEATURE_COLS = [
     # News presence indicator (added in code review improvements)
     "has_news",
 ]
+
+# ---------------------------------------------------------------------------
+# Covariance estimation
+# ---------------------------------------------------------------------------
+COV_SHRINKAGE_METHOD = "ledoit_wolf"  # "sample" (raw) or "ledoit_wolf" (shrinkage)
+
+# ---------------------------------------------------------------------------
+# Short selling
+# ---------------------------------------------------------------------------
+ALLOW_SHORT_SELLING  = False   # enable after universe expands to 129+ stocks
+SHORT_MAX_POSITION   = 0.10   # max short position (10% of portfolio)
+SHORT_MIN_PROB       = 0.20   # short stocks with pred_proba below this
+SHORT_KELLY_FRACTION = 0.25   # quarter-Kelly for shorts (more conservative)
+
+# ---------------------------------------------------------------------------
+# Sentiment staleness
+# ---------------------------------------------------------------------------
+SENTIMENT_DECAY_HALFLIFE_HOURS = 18.0  # article weight halves every 18 hours
+SENTIMENT_MAX_AGE_HOURS        = 72.0  # discard articles older than 72 hours
 
 # ---------------------------------------------------------------------------
 # Transaction costs

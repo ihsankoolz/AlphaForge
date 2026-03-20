@@ -24,8 +24,12 @@ from risk.position_sizer import (
     normalise_weights,
     compute_positions,
     calibrate_kelly_odds,
+    short_kelly_weights,
 )
-from config.settings import MIN_PROB, MAX_POSITION, KELLY_FRACTION, KELLY_ODDS
+from config.settings import (
+    MIN_PROB, MAX_POSITION, KELLY_FRACTION, KELLY_ODDS,
+    SHORT_MIN_PROB, SHORT_MAX_POSITION, SHORT_KELLY_FRACTION,
+)
 
 
 class TestKellyWeights:
@@ -266,6 +270,71 @@ class TestCalibrateKellyOdds:
         })
         odds = calibrate_kelly_odds(signals)
         assert odds == KELLY_ODDS
+
+
+class TestShortKellyWeights:
+    """Tests for short selling Kelly sizing."""
+
+    def test_disabled_by_default(self):
+        """With ALLOW_SHORT_SELLING=False (default), should return empty."""
+        import config.settings as cfg
+        original = cfg.ALLOW_SHORT_SELLING
+        cfg.ALLOW_SHORT_SELLING = False
+        try:
+            proba = pd.Series({"AAPL": 0.10, "MSFT": 0.05})
+            w = short_kelly_weights(proba)
+            assert w.empty
+        finally:
+            cfg.ALLOW_SHORT_SELLING = original
+
+    def test_enabled_produces_negative_weights(self):
+        """When enabled, low-proba stocks should get negative weights."""
+        import config.settings as cfg
+        original = cfg.ALLOW_SHORT_SELLING
+        cfg.ALLOW_SHORT_SELLING = True
+        try:
+            proba = pd.Series({"AAPL": 0.10, "MSFT": 0.05})
+            w = short_kelly_weights(proba)
+            assert not w.empty
+            assert (w < 0).all()  # all weights should be negative (short)
+        finally:
+            cfg.ALLOW_SHORT_SELLING = original
+
+    def test_above_threshold_excluded(self):
+        """Stocks above SHORT_MIN_PROB should NOT be shorted."""
+        import config.settings as cfg
+        original = cfg.ALLOW_SHORT_SELLING
+        cfg.ALLOW_SHORT_SELLING = True
+        try:
+            proba = pd.Series({"AAPL": 0.50, "MSFT": 0.70})
+            w = short_kelly_weights(proba)
+            assert w.empty
+        finally:
+            cfg.ALLOW_SHORT_SELLING = original
+
+    def test_short_weight_capped(self):
+        """Short weights should not exceed SHORT_MAX_POSITION in magnitude."""
+        import config.settings as cfg
+        original = cfg.ALLOW_SHORT_SELLING
+        cfg.ALLOW_SHORT_SELLING = True
+        try:
+            proba = pd.Series({"AAPL": 0.01})  # very low → large short signal
+            w = short_kelly_weights(proba)
+            assert abs(w["AAPL"]) <= SHORT_MAX_POSITION + 0.001
+        finally:
+            cfg.ALLOW_SHORT_SELLING = original
+
+    def test_empty_input(self):
+        """Empty input should return empty regardless of setting."""
+        import config.settings as cfg
+        original = cfg.ALLOW_SHORT_SELLING
+        cfg.ALLOW_SHORT_SELLING = True
+        try:
+            proba = pd.Series(dtype=float)
+            w = short_kelly_weights(proba)
+            assert w.empty
+        finally:
+            cfg.ALLOW_SHORT_SELLING = original
 
 
 if __name__ == "__main__":

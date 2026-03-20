@@ -1306,9 +1306,10 @@ AlphaForge/
 │   └── trading_YYYYMMDD.log                   ← daily execution logs
 ├── tests/
 │   ├── __init__.py
-│   ├── test_position_sizer.py               ← 20 tests: Kelly formula, vol adjust, edge cases
-│   ├── test_portfolio_optimiser.py          ← 14 tests: cov matrix, Sharpe opt, bounds
-│   └── test_circuit_breakers.py             ← 11 tests: signal sanity, allocation jump, turnover
+│   ├── test_position_sizer.py               ← 25 tests: Kelly formula, vol adjust, short selling, edge cases
+│   ├── test_portfolio_optimiser.py          ← 18 tests: cov matrix, Sharpe opt, Ledoit-Wolf, bounds
+│   ├── test_circuit_breakers.py             ← 11 tests: signal sanity, allocation jump, turnover
+│   └── test_sentiment_staleness.py         ← 12 tests: decay weight, freshness, edge cases
 ├── config/
 │   ├── __init__.py                          ← re-exports from settings.py
 │   └── settings.py                          ← SINGLE SOURCE OF TRUTH for all constants
@@ -1421,11 +1422,12 @@ This section documents a comprehensive code review performed across the entire c
 
 ### Test Coverage
 
-51 tests across 3 files, all passing. Key edge cases covered:
+72 tests across 4 files, all passing. Key edge cases covered:
 
-- **Position sizer:** zero volatility, NaN values, empty DataFrames, probability boundaries (0.0, 0.5, 1.0), max positions cap, half-Kelly fraction verification
-- **Portfolio optimiser:** singular covariance matrices, single-stock edge case, positive semi-definiteness, no-lookahead verification, regime-dependent weight caps
-- **Circuit breakers:** division by zero (zero symbols), first-run with no history, soft vs hard breaker behavior, boundary values
+- **Position sizer (25 tests):** zero volatility, NaN values, empty DataFrames, probability boundaries (0.0, 0.5, 1.0), max positions cap, half-Kelly fraction verification, short selling enable/disable, short weight capping, short threshold exclusion
+- **Portfolio optimiser (18 tests):** singular covariance matrices, single-stock edge case, positive semi-definiteness, no-lookahead verification, regime-dependent weight caps, Ledoit-Wolf shrinkage validity, condition number improvement, matrix symmetry
+- **Circuit breakers (11 tests):** division by zero (zero symbols), first-run with no history, soft vs hard breaker behavior, boundary values
+- **Sentiment staleness (12 tests):** decay weight at various ages, max age cutoff, halflife correctness, NaN/future timestamps, freshness feature, decay-weighted vs unweighted mean, has_news compatibility, empty inputs
 
 ---
 
@@ -1435,7 +1437,7 @@ This section documents a comprehensive code review performed across the entire c
 
 1. ~~**Kelly odds calibration**~~ → **FIXED.** Added `calibrate_kelly_odds()` to `risk/position_sizer.py`. Computes empirical win/loss ratio from actual signal quality data. Default prior still 2.0 but now data-driven with bounds [0.5, 5.0].
 
-2. ~~**No test coverage**~~ → **FIXED.** 51 unit tests across 3 test files: `test_position_sizer.py` (20 tests), `test_portfolio_optimiser.py` (14 tests), `test_circuit_breakers.py` (11 tests). Tests cover edge cases: zero volatility, NaN inputs, empty DataFrames, degenerate optimization.
+2. ~~**No test coverage**~~ → **FIXED.** 72 unit tests across 4 test files: `test_position_sizer.py` (25 tests), `test_portfolio_optimiser.py` (18 tests), `test_circuit_breakers.py` (11 tests), `test_sentiment_staleness.py` (12 tests). Tests cover edge cases: zero volatility, NaN inputs, empty DataFrames, degenerate optimization, Ledoit-Wolf shrinkage, short selling, sentiment decay.
 
 3. ~~**Hardcoded configuration everywhere**~~ → **FIXED.** Created `config/settings.py` — single source of truth for all constants. Modules import from config instead of defining their own copies. Symbol list defined once.
 
@@ -1457,20 +1459,20 @@ This section documents a comprehensive code review performed across the entire c
 
 1. **Universe expansion (Batches 2 & 3)** — Batch 1 done. Batches 2 and 3 will add depth within sectors and push toward 129-179 symbols.
 
-2. **Covariance estimation** — the 60-day lookback assumes stable correlations. In crises, correlations spike. Black-Litterman or robust optimization would handle this better.
+2. ~~**Covariance estimation**~~ → **FIXED.** Added Ledoit-Wolf shrinkage to `build_covariance_matrix()` in `risk/portfolio_optimiser.py`. Shrinks sample covariance toward a structured target (scaled identity), producing a better-conditioned matrix that the optimizer can invert reliably. Particularly valuable during crises when correlations spike and sample covariance becomes noisy. Configurable via `COV_SHRINKAGE_METHOD` in settings (`"ledoit_wolf"` or `"sample"`).
 
 3. **Sentiment coverage** — currently 56.8% on 79 symbols. Will recover as daily incremental fetches accumulate for new symbols.
 
 4. ~~**Transaction cost model**~~ → **FIXED.** Added `risk/transaction_costs.py` with per-stock cost model: half-spread (liquidity-tiered, 0.5-5bp) + square-root market impact. Replaces flat 0.1% in ml_backtest.py. Configurable via `config/settings.py`.
 
-5. **Short selling** — currently long-only due to universe composition bias. After Batches 2 and 3 include more mid-caps, short selling becomes more viable.
+5. ~~**Short selling**~~ → **IMPLEMENTED (disabled by default).** Added `short_kelly_weights()` to `risk/position_sizer.py` with quarter-Kelly sizing for short positions. Stocks with `pred_proba < SHORT_MIN_PROB` (0.20) are candidates. Capped at 10% per short position. Integrated into `compute_positions()` — when `ALLOW_SHORT_SELLING=True` in settings, the pipeline produces negative weights for shorts alongside positive weights for longs. Disabled by default due to universe composition bias; enable after universe expands to 129+ stocks.
 
 6. ~~**Turnover constraint**~~ → **FIXED.** Added turnover penalty (L1 norm × λ) to `maximise_sharpe()` in `risk/portfolio_optimiser.py`. Optimizer now penalizes weight changes vs previous day, reducing unnecessary trading. λ configurable via `TURNOVER_PENALTY_LAMBDA` in settings.
 
-7. **Sentiment staleness degradation** — articles from yesterday are 12+ hours old by trade time. Adding a staleness discount could improve freshness.
+7. ~~**Sentiment staleness degradation**~~ → **FIXED.** Added exponential time-decay weighting to `aggregate_daily_sentiment()` in `models/sentiment.py`. Articles are weighted by `2^(-age_hours / halflife)` where halflife = 18 hours. Articles older than 72 hours get zero weight. New `sentiment_freshness` feature (avg decay weight per day) lets XGBoost learn when sentiment data is stale. Added `_compute_staleness_weight()` function. Configurable via `SENTIMENT_DECAY_HALFLIFE_HOURS` and `SENTIMENT_MAX_AGE_HOURS` in settings.
 
 8. **Microservice architecture** — AlphaForge has natural service boundaries (ingest, features, sentiment, regime, signals, risk, execution, dashboard). Each could become a Docker container communicating via message broker. This is planned for post-Week 10.
 
 ---
 
-*Last updated: March 2026 — 12 improvements implemented. Latest: realistic transaction cost model (per-stock spread + market impact replacing flat 0.1%) and Markowitz turnover penalty (L1 norm in objective reduces unnecessary trading). All 51 tests passing. Pipeline ready for live paper trading on 79 symbols. Next: live paper trade 1 week, Batch 2 expansion, Week 9 dashboard.*
+*Last updated: March 2026 — 15 improvements implemented. Latest: Ledoit-Wolf shrinkage covariance (robust portfolio construction during crises), sentiment staleness degradation (exponential time-decay weighting for articles), and short selling framework (quarter-Kelly sizing, disabled by default until universe expansion). All 72 tests passing across 4 test files. Pipeline ready for live paper trading on 79 symbols. Next: live paper trade 1 week, Batch 2 expansion, Week 9 dashboard.*

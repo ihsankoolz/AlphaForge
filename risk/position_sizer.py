@@ -22,9 +22,11 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import config.settings as _cfg
 from config.settings import (
     KELLY_FRACTION, KELLY_ODDS, MIN_PROB, MAX_POSITION,
     VOL_LOOKBACK, VOL_TARGET, MAX_POSITIONS,
+    SHORT_MAX_POSITION, SHORT_MIN_PROB, SHORT_KELLY_FRACTION,
 )
 
 
@@ -78,6 +80,61 @@ def kelly_weights(pred_proba: pd.Series) -> pd.Series:
     kelly_half = kelly_raw * KELLY_FRACTION
 
     return kelly_half
+
+
+# ── 1b. SHORT SELLING KELLY SIZING ───────────────────────────────────────────
+
+def short_kelly_weights(pred_proba: pd.Series) -> pd.Series:
+    """
+    Compute Kelly-sized SHORT weights for stocks with very low pred_proba.
+
+    Short selling logic: if the model is confident a stock will
+    underperform (pred_proba < SHORT_MIN_PROB), we can profit by
+    shorting it. The Kelly formula naturally produces negative fractions
+    for these — we take the absolute value and apply a more conservative
+    quarter-Kelly (SHORT_KELLY_FRACTION = 0.25) because:
+      1. Short losses are theoretically unlimited (stock can go up forever)
+      2. Our universe is mostly large-cap winners — shorting has structural
+         headwind (universe composition bias)
+      3. Short squeezes can cause sudden extreme losses
+
+    This function is only called when _cfg.ALLOW_SHORT_SELLING is True.
+    Disabled by default — enable after universe expands to 129+ stocks
+    where there are enough mid-caps for short signals to have edge.
+
+    Args:
+        pred_proba: Series of ML probability scores, index = symbols
+
+    Returns:
+        Series of NEGATIVE weights for short positions.
+        Empty series if no stocks qualify or shorting is disabled.
+    """
+    if not _cfg.ALLOW_SHORT_SELLING:
+        return pd.Series(dtype=float)
+
+    # Only short stocks with very low conviction
+    short_candidates = pred_proba[pred_proba < SHORT_MIN_PROB].copy()
+
+    if short_candidates.empty:
+        return pd.Series(dtype=float)
+
+    b = KELLY_ODDS
+    # For shorts, the "probability of winning" is (1 - pred_proba)
+    # i.e., probability the stock goes DOWN
+    p_short = 1 - short_candidates   # prob of short winning
+    q_short = short_candidates        # prob of short losing
+
+    kelly_raw = (p_short * b - q_short) / b
+    kelly_raw = kelly_raw.clip(lower=0)
+
+    # Apply quarter-Kelly (more conservative than half-Kelly for longs)
+    kelly_short = kelly_raw * SHORT_KELLY_FRACTION
+
+    # Cap individual short positions
+    kelly_short = kelly_short.clip(upper=SHORT_MAX_POSITION)
+
+    # Return as negative weights to indicate short positions
+    return -kelly_short
 
 
 # ── 2. VOLATILITY ADJUSTMENT ─────────────────────────────────────────────────
@@ -203,19 +260,34 @@ def compute_positions(signals_today: pd.DataFrame,
 
     pred_proba = signals_today.set_index("symbol")["pred_proba"]
 
-    # Step 1: Kelly sizing
+    # Step 1: Kelly sizing (long positions)
     kelly_w = kelly_weights(pred_proba)
 
-    if kelly_w.empty:
+    if kelly_w.empty and not _cfg.ALLOW_SHORT_SELLING:
         return pd.Series(dtype=float)
 
-    # Step 2: Volatility adjustment
-    vol_w = volatility_adjust(kelly_w, features_df, date)
+    # Step 2: Volatility adjustment (long positions)
+    if not kelly_w.empty:
+        vol_w = volatility_adjust(kelly_w, features_df, date)
+        final_long = normalise_weights(vol_w, max_positions)
+    else:
+        final_long = pd.Series(dtype=float)
 
-    # Step 3: Normalise and cap
-    final_w = normalise_weights(vol_w, max_positions)
+    # Step 3: Short positions (if enabled)
+    if _cfg.ALLOW_SHORT_SELLING:
+        short_w = short_kelly_weights(pred_proba)
+        if not short_w.empty:
+            # Vol-adjust shorts the same way (using absolute values)
+            short_abs = short_w.abs()
+            short_vol = volatility_adjust(short_abs, features_df, date)
+            # Cap and re-negate
+            short_vol = short_vol.clip(upper=SHORT_MAX_POSITION)
+            short_final = -short_vol
+            # Combine: long weights are positive, short weights are negative
+            final_w = pd.concat([final_long, short_final])
+            return final_w
 
-    return final_w
+    return final_long
 
 
 # ── 5. DIAGNOSTIC — SEE WHAT THE SIZER IS DOING ──────────────────────────────
