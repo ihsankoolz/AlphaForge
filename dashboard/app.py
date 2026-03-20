@@ -713,6 +713,100 @@ elif page == "🎯 Signals":
             st.warning(f"Sentiment data loaded ({len(sentiment)} rows) but missing expected columns. "
                        f"Columns found: `{list(sentiment.columns)}`")
 
+    # ── Signal Quality Analytics ───────────────────────────────────────────
+    st.divider()
+    st.markdown("### Signal Quality Monitoring")
+
+    _ml_bt = load_parquet("backtest_ml.parquet")
+    if (not _ml_bt.empty and not signals.empty
+            and "pred_proba" in signals.columns and "date" in signals.columns):
+        from analytics.signal_quality import (
+            bucket_accuracy, signal_distribution_shift, _manual_auc,
+        )
+
+        # Bucket calibration: split all signals into 5 buckets
+        # Need to match predictions with outcomes — use features for forward returns
+        _feats = load_features()
+        _has_calibration = False
+
+        if (not _feats.empty and "return_1d" in _feats.columns
+                and "symbol" in _feats.columns and "date" in _feats.columns
+                and "symbol" in signals.columns):
+            # Build 5-day forward returns per (date, symbol) from features
+            _ret_pivot = _feats.pivot_table(index="date", columns="symbol", values="return_1d")
+            _fwd5 = _ret_pivot.rolling(5).sum().shift(-5)  # 5-day forward return
+            _fwd5_stacked = _fwd5.stack().reset_index()
+            _fwd5_stacked.columns = ["date", "symbol", "fwd_return_5d"]
+
+            _merged = signals.merge(_fwd5_stacked, on=["date", "symbol"], how="inner")
+            _merged = _merged.dropna(subset=["pred_proba", "fwd_return_5d"])
+
+            if len(_merged) > 100:
+                # Binary label: top quartile of 5-day returns = 1
+                _threshold = _merged["fwd_return_5d"].quantile(0.75)
+                _y_true = (_merged["fwd_return_5d"] >= _threshold).astype(float).values
+                _y_score = _merged["pred_proba"].values
+
+                # Overall AUC
+                if len(np.unique(_y_true)) >= 2:
+                    _auc = _manual_auc(_y_true, _y_score)
+                    st.metric("Overall AUC (non-overlapping)", f"{_auc:.4f}",
+                              help="AUC-ROC: 0.5 = random, 1.0 = perfect. "
+                                   "Measures how well the model ranks winners above losers.")
+
+                # Bucket calibration chart
+                buckets = bucket_accuracy(_y_true, _y_score, n_buckets=5)
+                if buckets:
+                    _has_calibration = True
+                    st.markdown("#### Prediction Calibration (5 Buckets)")
+                    st.caption("Do stocks predicted at high probability actually win more often?")
+
+                    _bk_df = pd.DataFrame(buckets)
+                    fig = make_subplots(specs=[[{"secondary_y": True}]])
+                    fig.add_trace(go.Bar(
+                        x=_bk_df["bucket"], y=_bk_df["actual_win_rate"] * 100,
+                        name="Actual Win Rate %",
+                        marker_color="#50C878",
+                    ), secondary_y=False)
+                    fig.add_trace(go.Scatter(
+                        x=_bk_df["bucket"], y=_bk_df["avg_pred"] * 100,
+                        name="Avg Prediction %",
+                        mode="lines+markers",
+                        line=dict(color="#E5C07B", width=2),
+                    ), secondary_y=True)
+                    fig.update_layout(**PLOTLY_LAYOUT, height=300,
+                                      legend=dict(orientation="h", yanchor="bottom", y=1.02))
+                    fig.update_yaxes(title_text="Actual Win Rate %", secondary_y=False)
+                    fig.update_yaxes(title_text="Avg Prediction %", secondary_y=True)
+                    st.plotly_chart(fig, use_container_width=True)
+
+                # Recalibration check (use recent vs older signal distributions)
+                _dates_sorted = sorted(_merged["date"].unique())
+                _mid = len(_dates_sorted) // 2
+                if _mid > 50:
+                    _old_scores = _merged[_merged["date"].isin(_dates_sorted[:_mid])]["pred_proba"].values
+                    _new_scores = _merged[_merged["date"].isin(_dates_sorted[_mid:])]["pred_proba"].values
+                    _kl = signal_distribution_shift(_old_scores, _new_scores)
+
+                    st.markdown("#### Signal Distribution Shift")
+                    c_kl1, c_kl2 = st.columns(2)
+                    c_kl1.metric("KL Divergence", f"{_kl:.4f}",
+                                 help="0 = identical distributions. "
+                                      ">0.1 = meaningful shift in model output.")
+                    _status = "Low drift" if _kl < 0.05 else "Moderate drift" if _kl < 0.15 else "High drift"
+                    _color = "#50C878" if _kl < 0.05 else "#E5C07B" if _kl < 0.15 else "#E06C75"
+                    c_kl2.markdown(
+                        f'<div style="margin-top:8px;padding:8px 16px;border-radius:8px;'
+                        f'border:1px solid {_color};color:{_color};display:inline-block;">'
+                        f'{_status}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+        if not _has_calibration:
+            st.info("Need ML signals + features with forward returns for calibration analysis.")
+    else:
+        st.info("Signal quality analytics require ML signals and backtest data.")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PAGE 3 — BACKTESTS
@@ -856,6 +950,88 @@ elif page == "📈 Backtests":
                         use_container_width=True, hide_index=True,
                     )
 
+        # ── Regime Transition Analysis ─────────────────────────────────────
+        regimes = load_regime_labels()
+        if not regimes.empty and "regime" in regimes.columns:
+            from analytics.regime_analysis import (
+                transition_matrix, regime_persistence, regime_accuracy,
+            )
+
+            regime_seq = regimes.sort_values("date")["regime"].values
+
+            st.divider()
+            st.markdown("### Regime Transition Analysis")
+
+            # Transition matrix heatmap
+            _labels = ["bull", "choppy", "bear"]
+            tm = transition_matrix(regime_seq, labels=_labels)
+            if tm["matrix"]:
+                col_tm, col_persist = st.columns([3, 2])
+
+                with col_tm:
+                    st.markdown("#### Transition Probabilities")
+                    st.caption("P(tomorrow's regime | today's regime)")
+                    _matrix = np.array(tm["matrix"])
+                    fig = go.Figure(go.Heatmap(
+                        z=_matrix,
+                        x=[l.upper() for l in _labels],
+                        y=[l.upper() for l in _labels],
+                        colorscale=[[0, "#0E1117"], [1, "#4A90D9"]],
+                        zmin=0, zmax=1,
+                        text=np.round(_matrix, 3),
+                        texttemplate="%{text:.1%}",
+                        textfont=dict(size=13),
+                    ))
+                    fig.update_layout(**PLOTLY_LAYOUT, height=300,
+                                      xaxis_title="To Regime",
+                                      yaxis_title="From Regime")
+                    fig.update_layout(margin=dict(l=80, r=20, t=30, b=60))
+                    st.plotly_chart(fig, use_container_width=True)
+
+                with col_persist:
+                    st.markdown("#### Regime Persistence")
+                    st.caption("Average duration per regime (trading days)")
+                    persist = regime_persistence(regime_seq)
+                    persist_rows = []
+                    for regime in _labels:
+                        p = persist.get(regime, {})
+                        if p:
+                            persist_rows.append({
+                                "Regime":   f"{REGIME_ICONS.get(regime, '')} {regime.upper()}",
+                                "Avg Days": p["avg_duration"],
+                                "Max Days": p["max_duration"],
+                                "Episodes": p["n_episodes"],
+                            })
+                    if persist_rows:
+                        st.dataframe(
+                            pd.DataFrame(persist_rows).style.format({
+                                "Avg Days": "{:.1f}",
+                            }),
+                            use_container_width=True, hide_index=True,
+                        )
+
+            # Regime accuracy (using ML backtest returns if available)
+            if "ML + Risk Layer" in portfolios:
+                _ml = portfolios["ML + Risk Layer"]
+                if "regime" in _ml.columns and "daily_return" in _ml.columns:
+                    _acc_regimes = _ml["regime"].values
+                    _acc_returns = _ml["daily_return"].values
+                    acc = regime_accuracy(_acc_regimes, _acc_returns)
+
+                    st.markdown("#### Regime Prediction Accuracy")
+                    st.caption("Did bull predictions actually have positive returns?")
+                    acc_cols = st.columns(len(acc.get("per_regime", {})) + 1)
+                    acc_cols[0].metric("Overall Accuracy",
+                                       f"{acc['overall_accuracy']:.1%}")
+                    for i, (reg, info) in enumerate(acc.get("per_regime", {}).items()):
+                        _reg_name = {"bull": "Bull", "bear": "Bear",
+                                     "choppy": "Choppy"}.get(reg, reg.upper())
+                        acc_cols[i + 1].metric(
+                            f"{_reg_name} Accuracy",
+                            f"{info['accuracy']:.1%}",
+                            help=f"{info['count']} days in this regime",
+                        )
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PAGE 4 — RISK
@@ -867,15 +1043,89 @@ elif page == "🛡️ Risk":
     positions_df = load_positions()
     features = load_features()
 
+    # ── Risk metrics from backtest returns ─────────────────────────────────
+    # Try to compute advanced risk metrics from the best available return series
+    _bt_ml = load_parquet("backtest_ml.parquet")
+    _has_returns = not _bt_ml.empty and "daily_return" in _bt_ml.columns
+
+    if _has_returns:
+        from analytics.risk_metrics import (
+            compute_var, compute_cvar, calmar_ratio, portfolio_beta,
+            return_skewness, return_kurtosis, max_drawdown,
+            herfindahl_index, effective_number_of_bets,
+        )
+        _ret = _bt_ml["daily_return"].dropna().values
+
+        st.markdown("### Portfolio Risk Metrics")
+        st.caption("Computed from ML + Risk Layer backtest returns")
+
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("VaR (95%)", f"{compute_var(_ret, 0.95):.2%}",
+                  help="On the worst 5% of days, you lose at least this much")
+        r2.metric("CVaR (95%)", f"{compute_cvar(_ret, 0.95):.2%}",
+                  help="Average loss on the worst 5% of days")
+        r3.metric("VaR (99%)", f"{compute_var(_ret, 0.99):.2%}",
+                  help="On the worst 1% of days, you lose at least this much")
+        r4.metric("CVaR (99%)", f"{compute_cvar(_ret, 0.99):.2%}",
+                  help="Average loss on the worst 1% of days (tail severity)")
+
+        r5, r6, r7, r8 = st.columns(4)
+        r5.metric("Max Drawdown", f"{max_drawdown(_ret):.2%}")
+        r6.metric("Calmar Ratio", f"{calmar_ratio(_ret):.2f}",
+                  help="Annualised return / max drawdown. Higher = better risk-adjusted")
+        r7.metric("Skewness", f"{return_skewness(_ret):.3f}",
+                  help="Negative = fatter left tail (more large losses)")
+        r8.metric("Excess Kurtosis", f"{return_kurtosis(_ret):.3f}",
+                  help=">0 = fat tails (more extreme events than normal)")
+
+        # Beta to SPY if features available
+        if not features.empty and "date" in features.columns and "symbol" in features.columns:
+            spy_data = features[features["symbol"] == "SPY"].copy()
+            if not spy_data.empty and "return_1d" in spy_data.columns:
+                spy_returns = spy_data.sort_values("date")["return_1d"].dropna().values
+                # Align lengths (take most recent overlap)
+                n = min(len(_ret), len(spy_returns))
+                if n > 20:
+                    beta = portfolio_beta(_ret[-n:], spy_returns[-n:])
+                    st.metric("Portfolio Beta (vs SPY)", f"{beta:.3f}",
+                              help="1.0 = moves with market. <1 = defensive. >1 = aggressive")
+
+        # Return distribution histogram
+        st.markdown("### Return Distribution")
+        fig = make_subplots(rows=1, cols=1)
+        fig.add_trace(go.Histogram(
+            x=_ret * 100, nbinsx=60,
+            marker_color="#4A90D9",
+            marker_line=dict(color="#1F6FEB", width=0.5),
+            name="Daily Returns",
+        ))
+        _var95 = compute_var(_ret, 0.95) * 100
+        fig.add_vline(x=_var95, line_dash="dash", line_color="#E06C75",
+                      annotation_text=f"VaR 95% ({_var95:.2f}%)")
+        fig.update_layout(**PLOTLY_LAYOUT, height=300,
+                          xaxis_title="Daily Return (%)", yaxis_title="Count")
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.divider()
+
     # ── Position concentration ────────────────────────────────────────────
     st.markdown("### Position Concentration")
     if not positions_df.empty:
         col_conc, col_tree = st.columns([1, 2])
 
         with col_conc:
-            weights = positions_df["weight_pct"].values / 100
-            hhi = (weights ** 2).sum()
-            n_eff = 1 / hhi if hhi > 0 else 0
+            weights_dict = dict(zip(positions_df["symbol"],
+                                    positions_df["weight_pct"] / 100))
+            try:
+                from analytics.risk_metrics import (
+                    herfindahl_index as _hhi, effective_number_of_bets as _enb,
+                )
+                hhi = _hhi(weights_dict)
+                n_eff = _enb(weights_dict)
+            except ImportError:
+                weights = positions_df["weight_pct"].values / 100
+                hhi = (weights ** 2).sum()
+                n_eff = 1 / hhi if hhi > 0 else 0
             max_pos = positions_df["weight_pct"].max()
 
             st.metric("HHI (Herfindahl)", f"{hhi:.4f}")
