@@ -1288,6 +1288,11 @@ AlphaForge/
 │   ├── sentiment.py                           ← FinBERT pipeline; now produces has_news feature
 │   ├── versioning.py                          ← NEW: model versioning with timestamped saves + rollback
 │   └── versions/                              ← NEW: timestamped model snapshots (last 10 kept)
+├── analytics/
+│   ├── __init__.py                            ← makes analytics/ importable as a module
+│   ├── risk_metrics.py                        ← NEW: VaR, CVaR, concentration, Calmar, beta, skewness, kurtosis
+│   ├── signal_quality.py                      ← NEW: rolling AUC, bucket calibration, model drift, recalibration
+│   └── regime_analysis.py                     ← NEW: transition matrix, regime-conditional Sharpe, persistence
 ├── risk/
 │   ├── __init__.py                            ← makes risk/ importable as a module
 │   ├── position_sizer.py                      ← Kelly Criterion; compute_kelly_weights() wrapper
@@ -1306,10 +1311,13 @@ AlphaForge/
 │   └── trading_YYYYMMDD.log                   ← daily execution logs
 ├── tests/
 │   ├── __init__.py
-│   ├── test_position_sizer.py               ← 25 tests: Kelly formula, vol adjust, short selling, edge cases
-│   ├── test_portfolio_optimiser.py          ← 18 tests: cov matrix, Sharpe opt, Ledoit-Wolf, bounds
+│   ├── test_position_sizer.py               ← 30 tests: Kelly formula, vol adjust, short selling, edge cases
+│   ├── test_portfolio_optimiser.py          ← 19 tests: cov matrix, Sharpe opt, Ledoit-Wolf, bounds
 │   ├── test_circuit_breakers.py             ← 11 tests: signal sanity, allocation jump, turnover
-│   └── test_sentiment_staleness.py         ← 12 tests: decay weight, freshness, edge cases
+│   ├── test_sentiment_staleness.py          ← 12 tests: decay weight, freshness, edge cases
+│   ├── test_risk_metrics.py                 ← NEW: 38 tests: VaR, CVaR, HHI, Calmar, beta, skew, kurtosis
+│   ├── test_signal_quality.py               ← NEW: 24 tests: AUC, buckets, KL divergence, drift, recalibration
+│   └── test_regime_analysis.py              ← NEW: 23 tests: transitions, persistence, accuracy, reports
 ├── config/
 │   ├── __init__.py                          ← re-exports from settings.py
 │   └── settings.py                          ← SINGLE SOURCE OF TRUTH for all constants
@@ -1380,6 +1388,12 @@ This section documents a comprehensive code review performed across the entire c
 | `tests/test_position_sizer.py` | 20 unit tests for Kelly sizing, vol adjustment, normalisation, calibration |
 | `tests/test_portfolio_optimiser.py` | 14 unit tests for covariance, expected returns, Sharpe optimisation |
 | `tests/test_circuit_breakers.py` | 11 unit tests for all circuit breaker checks |
+| `analytics/risk_metrics.py` | Portfolio risk metrics: VaR, CVaR, concentration (HHI), Calmar ratio, beta, skewness, kurtosis |
+| `analytics/signal_quality.py` | ML signal monitoring: rolling AUC, bucket calibration, KL divergence drift, recalibration triggers |
+| `analytics/regime_analysis.py` | Regime analysis: transition matrix, regime-conditional Sharpe, persistence stats, accuracy |
+| `tests/test_risk_metrics.py` | 38 unit tests for all risk metrics functions |
+| `tests/test_signal_quality.py` | 24 unit tests for signal quality monitoring |
+| `tests/test_regime_analysis.py` | 23 unit tests for regime analysis |
 
 ### Bug Fixes
 
@@ -1422,12 +1436,15 @@ This section documents a comprehensive code review performed across the entire c
 
 ### Test Coverage
 
-72 tests across 4 files, all passing. Key edge cases covered:
+157 tests across 7 files, all passing. Key edge cases covered:
 
-- **Position sizer (25 tests):** zero volatility, NaN values, empty DataFrames, probability boundaries (0.0, 0.5, 1.0), max positions cap, half-Kelly fraction verification, short selling enable/disable, short weight capping, short threshold exclusion
-- **Portfolio optimiser (18 tests):** singular covariance matrices, single-stock edge case, positive semi-definiteness, no-lookahead verification, regime-dependent weight caps, Ledoit-Wolf shrinkage validity, condition number improvement, matrix symmetry
+- **Position sizer (30 tests):** zero volatility, NaN values, empty DataFrames, probability boundaries (0.0, 0.5, 1.0), max positions cap, half-Kelly fraction verification, short selling enable/disable, short weight capping, short threshold exclusion
+- **Portfolio optimiser (19 tests):** singular covariance matrices, single-stock edge case, positive semi-definiteness, no-lookahead verification, regime-dependent weight caps, Ledoit-Wolf shrinkage validity, condition number improvement, matrix symmetry
 - **Circuit breakers (11 tests):** division by zero (zero symbols), first-run with no history, soft vs hard breaker behavior, boundary values
 - **Sentiment staleness (12 tests):** decay weight at various ages, max age cutoff, halflife correctness, NaN/future timestamps, freshness feature, decay-weighted vs unweighted mean, has_news compatibility, empty inputs
+- **Risk metrics (38 tests):** VaR at multiple confidence levels, CVaR worse than VaR, HHI for equal/concentrated/empty portfolios, effective number of bets, Calmar with/without drawdowns, beta (perfect/double/zero/uncorrelated), skewness symmetry, kurtosis fat tails, composite summary
+- **Signal quality (24 tests):** manual AUC (perfect/random/inverse), rolling AUC windows, bucket calibration ordering, KL divergence (identical/shifted), recalibration trigger thresholds, feature importance drift cosine similarity, composite report
+- **Regime analysis (23 tests):** transition matrix row sums, known transition counts, regime-conditional Sharpe signs, persistence durations, regime accuracy (bull/bear/string labels), distribution counting, composite report
 
 ---
 
@@ -1437,7 +1454,7 @@ This section documents a comprehensive code review performed across the entire c
 
 1. ~~**Kelly odds calibration**~~ → **FIXED.** Added `calibrate_kelly_odds()` to `risk/position_sizer.py`. Computes empirical win/loss ratio from actual signal quality data. Default prior still 2.0 but now data-driven with bounds [0.5, 5.0].
 
-2. ~~**No test coverage**~~ → **FIXED.** 72 unit tests across 4 test files: `test_position_sizer.py` (25 tests), `test_portfolio_optimiser.py` (18 tests), `test_circuit_breakers.py` (11 tests), `test_sentiment_staleness.py` (12 tests). Tests cover edge cases: zero volatility, NaN inputs, empty DataFrames, degenerate optimization, Ledoit-Wolf shrinkage, short selling, sentiment decay.
+2. ~~**No test coverage**~~ → **FIXED.** 157 unit tests across 7 test files: `test_position_sizer.py` (30 tests), `test_portfolio_optimiser.py` (19 tests), `test_circuit_breakers.py` (11 tests), `test_sentiment_staleness.py` (12 tests), `test_risk_metrics.py` (38 tests), `test_signal_quality.py` (24 tests), `test_regime_analysis.py` (23 tests). Tests cover edge cases: zero volatility, NaN inputs, empty DataFrames, degenerate optimization, Ledoit-Wolf shrinkage, short selling, sentiment decay, VaR/CVaR, concentration, model drift, regime transitions.
 
 3. ~~**Hardcoded configuration everywhere**~~ → **FIXED.** Created `config/settings.py` — single source of truth for all constants. Modules import from config instead of defining their own copies. Symbol list defined once.
 
@@ -1473,6 +1490,12 @@ This section documents a comprehensive code review performed across the entire c
 
 8. **Microservice architecture** — AlphaForge has natural service boundaries (ingest, features, sentiment, regime, signals, risk, execution, dashboard). Each could become a Docker container communicating via message broker. This is planned for post-Week 10.
 
+9. ~~**No portfolio risk metrics beyond Sharpe/drawdown**~~ → **FIXED.** Added `analytics/risk_metrics.py` with: Value at Risk (VaR, historical simulation at 95%/99%), Conditional VaR (Expected Shortfall — average loss in the tail), Herfindahl concentration index + effective number of bets, Calmar ratio (annualised return / max drawdown), portfolio beta to benchmark, return distribution skewness and excess kurtosis, and a composite `risk_summary()` that computes all metrics in one call. All functions are pure (no I/O) and handle edge cases (empty inputs, NaN values, zero variance). 38 tests.
+
+10. ~~**No signal quality monitoring / model drift detection**~~ → **FIXED.** Added `analytics/signal_quality.py` with: rolling AUC on non-overlapping windows (avoids temporal correlation inflation), prediction bucket accuracy (calibration check — do 70% predictions actually win 70%?), signal distribution shift via KL divergence (detects when model output distribution changes), automatic recalibration trigger (alerts when rolling AUC drops below 0.55), feature importance drift via cosine similarity (detects when different features start driving predictions), and a composite `signal_quality_report()`. Includes a standalone `_manual_auc()` implementation (Wilcoxon-Mann-Whitney) to avoid sklearn dependency in analytics. 24 tests.
+
+11. ~~**No regime analysis / transition tracking**~~ → **FIXED.** Added `analytics/regime_analysis.py` with: empirical transition matrix (P(regime tomorrow | regime today) — rows sum to 1.0), regime-conditional performance (Sharpe, max drawdown, win rate per regime), regime persistence statistics (average/min/max duration per regime, number of episodes), regime accuracy measurement (did bull predictions actually have positive returns?), and a composite `regime_report()`. Supports both integer labels (0/1/2) and string labels ("bull"/"choppy"/"bear"). 23 tests.
+
 ---
 
-*Last updated: March 2026 — 15 improvements implemented. Latest: Ledoit-Wolf shrinkage covariance (robust portfolio construction during crises), sentiment staleness degradation (exponential time-decay weighting for articles), and short selling framework (quarter-Kelly sizing, disabled by default until universe expansion). All 72 tests passing across 4 test files. Pipeline ready for live paper trading on 79 symbols. Next: live paper trade 1 week, Batch 2 expansion, Week 9 dashboard.*
+*Last updated: March 2026 — 18 improvements implemented. Latest: portfolio risk metrics (VaR, CVaR, concentration, Calmar, beta, skewness, kurtosis), signal quality monitoring (rolling AUC, calibration buckets, KL divergence drift, recalibration triggers), and regime transition analysis (transition matrix, regime-conditional Sharpe, persistence, accuracy). All 157 tests passing across 7 test files. Pipeline ready for live paper trading on 79 symbols. Next: live paper trade 1 week, Batch 2 expansion, Week 9 dashboard.*

@@ -6,7 +6,12 @@
       "Bash(venv/Scripts/python -m pytest tests/ -v --tb=short)",
       "Bash(venv/Scripts/python -m pytest tests/ -v)",
       "Bash(schtasks /query /tn \"AlphaForge Daily Pipeline\")",
-      "Bash(schtasks //query //tn \"AlphaForge Daily Pipeline\")"
+      "Bash(schtasks //query //tn \"AlphaForge Daily Pipeline\")",
+      "Bash(grep -c \"def test_\\\\|assert \" /c/Users/ihsan/OneDrive/Documents/AlphaForge/tests/test_*.py)",
+      "Bash(bc)",
+      "Bash(grep -c \"def test_\" /c/Users/ihsan/OneDrive/Documents/AlphaForge/tests/test_*.py)",
+      "Bash(grep -c \"assert \" /c/Users/ihsan/OneDrive/Documents/AlphaForge/tests/test_*.py)",
+      "Bash(find /c/Users/ihsan/OneDrive/Documents/AlphaForge/tests -name \"*.py\" -exec wc -l {} +)"
     ]
   }
 }
