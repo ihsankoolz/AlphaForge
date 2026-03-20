@@ -84,21 +84,24 @@ BATCH2_SYMBOLS = [
     "CCI", "EQIX",                            # data center REITs
 ]
 
-# Import existing universe from config
-from config.settings import SYMBOLS as EXISTING_SYMBOLS
+# Import pre-Batch-2 universe (Original + Batch 1 only) to detect true duplicates.
+# We check against Original + Batch1 specifically — NOT SYMBOLS (which may already
+# include Batch 2 if settings.py was updated before this script ran).
+from config.settings import SYMBOLS_ORIGINAL, SYMBOLS_BATCH1
 
-FULL_UNIVERSE = EXISTING_SYMBOLS + BATCH2_SYMBOLS
+PRE_BATCH2_UNIVERSE = SYMBOLS_ORIGINAL + SYMBOLS_BATCH1
 
-# Validate no duplicates
-dupes = set(EXISTING_SYMBOLS) & set(BATCH2_SYMBOLS)
+# Only flag actual duplicates against pre-Batch-2 universe
+dupes = set(PRE_BATCH2_UNIVERSE) & set(BATCH2_SYMBOLS)
 if dupes:
-    print(f"WARNING: {len(dupes)} duplicate symbols detected: {dupes}")
+    print(f"WARNING: {len(dupes)} duplicate symbols with Original+Batch1: {dupes}")
     print("Removing duplicates from Batch 2...")
-    BATCH2_SYMBOLS = [s for s in BATCH2_SYMBOLS if s not in set(EXISTING_SYMBOLS)]
-    FULL_UNIVERSE = EXISTING_SYMBOLS + BATCH2_SYMBOLS
+    BATCH2_SYMBOLS = [s for s in BATCH2_SYMBOLS if s not in set(PRE_BATCH2_UNIVERSE)]
+
+FULL_UNIVERSE = PRE_BATCH2_UNIVERSE + BATCH2_SYMBOLS
 
 print(f"Batch 2: {len(BATCH2_SYMBOLS)} new symbols")
-print(f"Existing universe: {len(EXISTING_SYMBOLS)} symbols")
+print(f"Pre-Batch-2 universe: {len(PRE_BATCH2_UNIVERSE)} symbols")
 print(f"Full universe after expansion: {len(FULL_UNIVERSE)} symbols")
 
 
@@ -202,11 +205,14 @@ def stage2_news():
     # ── Step 2a: Fetch raw news ───────────────────────────────────────────────
     raw_cache = os.path.join(DATA_DIR, 'batch2_news_raw.parquet')
 
-    if os.path.exists(raw_cache):
-        print("\n  Loading cached raw news for batch 2...")
+    if os.path.exists(raw_cache) and os.path.getsize(raw_cache) > 1000:
         news_df = pd.read_parquet(raw_cache)
-        print(f"  Loaded {len(news_df):,} cached articles")
-    else:
+        if len(news_df) > 0:
+            print(f"\n  Loading cached raw news for batch 2... {len(news_df):,} articles")
+        else:
+            print("\n  Cached news file is empty — re-fetching...")
+            os.remove(raw_cache)
+    if not os.path.exists(raw_cache):
         print("\n  Fetching news from Alpaca (2020-01-01 → 2026-12-31)...")
         print("  This takes ~90 minutes — do not interrupt\n")
         news_df = fetch_news_alpaca(
@@ -399,9 +405,19 @@ def stage4_retrain():
     # ── 4b: Retrain HMM ─────────────────────────────────────────────────────
     print("\n  Retraining HMM on 129-symbol features...")
     try:
-        from models.regime_hmm import train_hmm
-        train_hmm()
-        print("  HMM retrained successfully")
+        from models.regime_hmm import load_market_features, train_hmm, label_regimes
+        import pickle
+        market_features = load_market_features()
+        print(f"  Market features: {len(market_features)} days")
+        model, scaler, feature_cols = train_hmm(market_features)
+        regime_df, label_map = label_regimes(market_features, model, scaler, feature_cols)
+        # Save model + labels
+        model_path = os.path.join(PROJECT_ROOT, 'models', 'hmm_model.pkl')
+        with open(model_path, 'wb') as f:
+            pickle.dump({'model': model, 'scaler': scaler, 'feature_cols': feature_cols}, f)
+        regime_df.to_parquet(os.path.join(DATA_DIR, 'regime_labels.parquet'))
+        print(f"  HMM retrained — saved to {model_path}")
+        print(f"  Regime labels: {len(regime_df)} days, label_map: {label_map}")
     except ImportError:
         print("  models.regime_hmm.train_hmm() not found — run manually:")
         print("    python models/regime_hmm.py")
