@@ -1,0 +1,147 @@
+###############################################################################
+# AlphaForge — Docker Compose (microservice architecture)
+###############################################################################
+#
+# Services map 1:1 to the daily pipeline stages in execution/run_daily.py:
+#   ingest → features → sentiment → regime → signals → risk → execution
+# Plus the Streamlit dashboard as a standalone UI service.
+#
+# Each service shares the same codebase (mounted as a volume) but runs a
+# specific entrypoint.  This means you can develop locally as before AND
+# deploy as containers — no code duplication.
+#
+# Quick start:
+#   docker-compose up --build            # run everything
+#   docker-compose up dashboard          # just the dashboard
+#   docker-compose run signals bash      # drop into a shell for debugging
+#
+# Environment variables are read from .env (Alpaca keys, DB creds, etc.).
+###############################################################################
+
+version: "3.9"
+
+x-common: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file: .env
+  volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+    - ./models:/app/models
+  restart: "no"
+
+services:
+  # ─── Data layer ─────────────────────────────────────────────────────
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-alphaforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alphaforge}
+      POSTGRES_DB: ${POSTGRES_DB:-alphaforge}
+    volumes:
+      - tsdb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alphaforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ─── Pipeline services ──────────────────────────────────────────────
+  ingest:
+    <<: *common
+    container_name: af-ingest
+    command: ["python", "-m", "services.ingest.main"]
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  features:
+    <<: *common
+    container_name: af-features
+    command: ["python", "-m", "services.features.main"]
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+  sentiment:
+    <<: *common
+    container_name: af-sentiment
+    command: ["python", "-m", "services.sentiment.main"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  regime:
+    <<: *common
+    container_name: af-regime
+    command: ["python", "-m", "services.regime.main"]
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+  signals:
+    <<: *common
+    container_name: af-signals
+    command: ["python", "-m", "services.signals.main"]
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+  risk:
+    <<: *common
+    container_name: af-risk
+    command: ["python", "-m", "services.risk.main"]
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+  execution:
+    <<: *common
+    container_name: af-execution
+    command: ["python", "-m", "services.execution.main"]
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── Dashboard ──────────────────────────────────────────────────────
+  dashboard:
+    <<: *common
+    container_name: af-dashboard
+    command: ["streamlit", "run", "dashboard/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    ports:
+      - "8501:8501"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+  # ─── Orchestrator (runs the full pipeline sequentially) ─────────────
+  pipeline:
+    <<: *common
+    container_name: af-pipeline
+    command: ["python", "-m", "execution.run_daily"]
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles: ["full-pipeline"]
+
+volumes:
+  tsdb_data:

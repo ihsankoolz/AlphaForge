@@ -181,11 +181,15 @@ class EnsembleModel:
         weights = []
 
         if self.xgb_model is not None:
-            importances.append(self.xgb_model.feature_importances_)
+            imp = self.xgb_model.feature_importances_
+            imp_sum = imp.sum()
+            importances.append(imp / imp_sum if imp_sum > 0 else imp)
             weights.append(self.xgb_weight)
 
         if self.lgb_model is not None:
-            importances.append(self.lgb_model.feature_importances_)
+            imp = self.lgb_model.feature_importances_
+            imp_sum = imp.sum()
+            importances.append(imp / imp_sum if imp_sum > 0 else imp)
             weights.append(self.lgb_weight)
 
         if not importances:

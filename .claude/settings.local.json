@@ -11,7 +11,10 @@
       "Bash(bc)",
       "Bash(grep -c \"def test_\" /c/Users/ihsan/OneDrive/Documents/AlphaForge/tests/test_*.py)",
       "Bash(grep -c \"assert \" /c/Users/ihsan/OneDrive/Documents/AlphaForge/tests/test_*.py)",
-      "Bash(find /c/Users/ihsan/OneDrive/Documents/AlphaForge/tests -name \"*.py\" -exec wc -l {} +)"
+      "Bash(find /c/Users/ihsan/OneDrive/Documents/AlphaForge/tests -name \"*.py\" -exec wc -l {} +)",
+      "Bash(ls data/processed/*.parquet)",
+      "Bash(venv/Scripts/python research/strategies/ml_backtest.py)",
+      "Bash(PYTHONUTF8=1 venv/Scripts/python research/strategies/ml_backtest.py)"
     ]
   }
 }

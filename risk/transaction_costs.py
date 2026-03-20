@@ -37,13 +37,27 @@ from config.settings import MIN_ORDER_VALUE
 # Tier 3: Mid-cap or lower volume (some Batch 1 additions)
 
 SPREAD_TIERS = {
-    # Tier 1: ~1bp half-spread
+    # Tier 1: ~0.5-1bp — mega-cap / ETFs, extremely liquid
     "AAPL": 1, "MSFT": 1, "AMZN": 1, "GOOGL": 1, "NVDA": 1, "META": 1,
     "TSLA": 2, "SPY": 0.5, "QQQ": 0.5,
-    # Tier 2: ~2-3bp (default for most stocks)
-    # Tier 3: ~4-5bp (assigned below)
+    # Tier 2: ~2-3bp (default for most large-cap stocks)
+    "PYPL": 2, "CMCSA": 2, "T": 2, "PANW": 2, "CRWD": 2,
+    # Tier 3: ~3-4bp — large-cap but lower volume
     "NEM": 5, "DUK": 4, "NEE": 3, "AMT": 3, "PLD": 3,
     "COF": 4, "BK": 4, "SCHW": 3, "MDT": 3,
+    # Batch 2 — Tier 3: mid-cap / lower liquidity
+    "ZS": 4, "DDOG": 3, "SNOW": 3, "TEAM": 4,
+    "SQ": 3, "FIS": 3, "FISV": 3,
+    "MET": 3, "AIG": 3, "TRV": 3, "PGR": 3,
+    "MRNA": 3, "BIIB": 4,
+    "ZBH": 4, "EW": 3, "DXCM": 4,
+    "ABNB": 3, "DASH": 3, "DPZ": 4, "YUM": 3,
+    "LULU": 3, "ROST": 3,
+    "HWM": 5, "TDG": 4, "NOC": 3, "GD": 3,
+    "ENPH": 5, "FSLR": 4,
+    "WMB": 3, "KMI": 3,
+    "FCX": 3, "APD": 3, "SHW": 3,
+    "CHTR": 3, "CCI": 3, "EQIX": 3,
 }
 
 DEFAULT_HALF_SPREAD_BP = 2.5  # basis points — reasonable for large-cap US equities

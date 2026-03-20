@@ -1,0 +1,12 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.git/
+.claude/
+logs/
+data/processed/
+models/*.pkl
+models/versions/
+*.egg-info/
+.env
