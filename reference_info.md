@@ -31,7 +31,7 @@ This is not a research notebook. It is a system — each component has a specifi
 | 7 | Risk & Portfolio Layer (Kelly + Markowitz) | ✅ Done |
 | 8 | Execution Layer & Paper Trading | ✅ Done |
 | 8.5 | Universe Expansion (29 → 79 stocks, Batch 1) | ✅ Done |
-| 9 | Dashboard & Visualization | ⏳ Upcoming |
+| 9 | Dashboard & Visualization | ✅ Done |
 | 10 | Polish, Documentation & Write-Up | ⏳ Upcoming |
 
 **Note on universe expansion:** Deliberately deferred until after the execution layer was working. Executed as planned — Batch 1 (50 new symbols) completed, system now live on 79 stocks. Batches 2 and 3 planned after validating paper trading stability on 79-symbol universe.
@@ -1306,7 +1306,11 @@ AlphaForge/
 ├── scripts/
 │   └── expand_universe_batch1.py              ← one-time universe expansion script
 │                                                 3 stages, checkpointed, safe to interrupt/resume
-├── dashboard/                                 ← Week 9
+├── dashboard/
+│   └── app.py                                 ← Streamlit dashboard — 5 pages: Overview, Signals, Backtests, Risk, Pipeline
+│                                                 Integrates analytics/ modules: VaR/CVaR/beta on Risk page,
+│                                                 signal calibration + KL drift on Signals page,
+│                                                 regime transition heatmap + persistence on Backtests page
 ├── logs/
 │   └── trading_YYYYMMDD.log                   ← daily execution logs
 ├── tests/
@@ -1348,6 +1352,8 @@ torch            ← PyTorch backend for FinBERT
 scipy            ← portfolio optimization (SLSQP solver) ← NEW Week 7
 zoneinfo         ← timezone handling for market hours check ← NEW Week 8
 pytest           ← unit testing framework ← NEW code review improvements
+streamlit        ← dashboard UI framework ← NEW Week 9
+plotly           ← interactive charts for dashboard ← NEW Week 9
 ```
 
 ---
@@ -1362,9 +1368,9 @@ Pipeline is fully operational on 79 symbols. Run `python execution/run_daily.py 
 
 Add 50 more symbols → 129 total. Focus: depth within existing sectors. Run `scripts/expand_universe_batch2.py` (to be built), retrain HMM + XGBoost, verify dry run. Trigger: after confirming Batch 1 paper trading is stable for ~5 trading days.
 
-### Week 9 — Streamlit Dashboard
+### Week 9 — Streamlit Dashboard ✅ DONE
 
-Live P&L curve, current positions, strategy performance by regime, sentiment signals, risk metrics updating daily.
+Dashboard built with 5 pages: Overview (account, positions, sector pie, regime history, orders), Signals (ML scores, distribution, sentiment, signal quality calibration, KL drift), Backtests (equity curves, strategy comparison, drawdowns, regime breakdown, transition heatmap, persistence), Risk (VaR/CVaR, Calmar, beta, skewness/kurtosis, return distribution, concentration treemap, correlation heatmap), Pipeline (stage timing, data freshness, log viewer). Integrates all 3 analytics modules. Run `streamlit run dashboard/app.py`.
 
 ### Week 10 — Polish & Write-Up
 
@@ -1498,4 +1504,4 @@ This section documents a comprehensive code review performed across the entire c
 
 ---
 
-*Last updated: March 2026 — 18 improvements implemented. Latest: portfolio risk metrics (VaR, CVaR, concentration, Calmar, beta, skewness, kurtosis), signal quality monitoring (rolling AUC, calibration buckets, KL divergence drift, recalibration triggers), and regime transition analysis (transition matrix, regime-conditional Sharpe, persistence, accuracy). All 157 tests passing across 7 test files. Pipeline ready for live paper trading on 79 symbols. Next: live paper trade 1 week, Batch 2 expansion, Week 9 dashboard.*
+*Last updated: March 2026 — 19 improvements implemented. Latest: Streamlit dashboard (5 pages) with integrated analytics — Risk page shows VaR/CVaR/Calmar/beta/skewness/kurtosis/return distribution, Signals page shows prediction calibration buckets and KL divergence drift detection, Backtests page shows regime transition heatmap/persistence/accuracy. All 157 tests passing across 7 test files. Pipeline ready for live paper trading on 79 symbols. Week 9 (Dashboard) complete. Next: live paper trade 1 week, Batch 2 expansion, Week 10 polish.*
