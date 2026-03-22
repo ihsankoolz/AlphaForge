@@ -189,7 +189,9 @@ def predict_regime(features_df: pd.DataFrame,
 
     model     = bundle["model"]       # trained GaussianHMM
     scaler    = bundle["scaler"]      # StandardScaler fitted on training data
-    label_map = bundle["label_map"]   # {raw_int_state: 'bull'/'choppy'/'bear'}
+    label_map = bundle.get("label_map")  # {raw_int_state: 'bull'/'choppy'/'bear'}
+    # label_map may be absent if saved by expand_universe_batch2.py
+    # In that case, we'll build it from the data below
 
     # ── Aggregate stock-level → market-level ─────────────────────────────────
     # Exact same aggregation as load_market_features() during training.
@@ -250,6 +252,21 @@ def predict_regime(features_df: pd.DataFrame,
     # which considers transitions across the entire history — more accurate
     # than predicting a single point in isolation.
     raw_states  = model.predict(X_scaled)
+
+    # Build label_map from data if not present in pickle
+    if label_map is None:
+        daily_with_states = daily.copy()
+        daily_with_states["raw_state"] = raw_states
+        state_vols = (
+            daily_with_states.groupby("raw_state")["mean_volatility"]
+            .mean().sort_values()
+        )
+        label_map = {
+            state_vols.index[0]: "bull",
+            state_vols.index[1]: "choppy",
+            state_vols.index[2]: "bear",
+        }
+
     last_state  = int(raw_states[-1])
     regime      = label_map.get(last_state)
 

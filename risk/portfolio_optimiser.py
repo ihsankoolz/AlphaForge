@@ -402,9 +402,20 @@ def optimize_weights(
     if not kelly_weights:
         return {}
 
-    symbols      = list(kelly_weights.keys())
     kelly_series = pd.Series(kelly_weights)
-    kelly_total  = kelly_series.sum()
+
+    # ── Split long and short positions ────────────────────────────────────────
+    # Markowitz is a long-only optimizer (bounds ≥ 0, sum = 1).
+    # Passing short (negative) weights into it causes them to flip positive.
+    # Solution: optimize only longs, preserve Kelly shorts unchanged.
+    long_series  = kelly_series[kelly_series > 0]
+    short_series = kelly_series[kelly_series < 0]  # keep as negative weights
+
+    if long_series.empty:
+        return kelly_weights  # no longs — nothing to optimise
+
+    symbols     = long_series.index.tolist()
+    kelly_total = long_series.sum()   # total long capital from Kelly
 
     # Prepare features with a 'date' column for covariance lookback
     df = features_df.copy()
@@ -415,41 +426,36 @@ def optimize_weights(
 
     latest_date = df["date"].max()
 
-    # ── Covariance matrix ────────────────────────────────────────────────────
+    # ── Covariance matrix (longs only) ───────────────────────────────────────
     cov_matrix = build_covariance_matrix(symbols, df, latest_date)
     if cov_matrix is None:
         return kelly_weights  # insufficient history — fall back
 
-    # ── Expected returns from Kelly pred_proba proxy ──────────────────────────
-    # Reconstruct a minimal signals DataFrame so build_expected_returns works.
-    # We back out an approximate pred_proba from the Kelly weight:
-    #   kelly_half = ((p*2 - (1-p)) / 2) * 0.5  →  p = (kelly_half / 0.5 * 2 + 1) / 3
-    # Simpler: use the kelly weight magnitude directly as a proxy for confidence.
-    # Expected return = (weight / MAX_WEIGHT) rescaled to [0.35, 0.90] range.
-    proba_proxy = kelly_series / kelly_series.max()          # normalise to [0,1]
-    proba_proxy = 0.35 + proba_proxy * (0.90 - 0.35)         # map to [0.35, 0.90]
+    # ── Expected returns from Kelly weight proxy ──────────────────────────────
+    proba_proxy = long_series / long_series.max()          # normalise to [0,1]
+    proba_proxy = 0.35 + proba_proxy * (0.90 - 0.35)       # map to [0.35, 0.90]
     signals_proxy = proba_proxy.reset_index()
     signals_proxy.columns = ["symbol", "pred_proba"]
 
     expected_returns = build_expected_returns(symbols, signals_proxy)
 
-    # ── Markowitz optimisation ────────────────────────────────────────────────
+    # ── Markowitz optimisation (long-only) ────────────────────────────────────
     max_w = MAX_WEIGHT * 0.7 if regime == "bear" else MAX_WEIGHT
 
-    # Convert prev_weights dict to Series for the optimizer
-    prev_w_series = pd.Series(prev_weights) if prev_weights else None
+    prev_w_series = pd.Series(prev_weights).reindex(symbols, fill_value=0.0) if prev_weights else None
 
     try:
         opt_weights = maximise_sharpe(expected_returns, cov_matrix, prev_w_series)
     except Exception:
         return kelly_weights  # optimisation error — fall back to Kelly
 
-    # Apply regime cap
+    # Apply regime cap and rescale by Kelly's total long capital
     opt_weights = opt_weights.clip(upper=max_w)
+    final_long = opt_weights * kelly_total
+    final_long = final_long.clip(upper=MAX_WEIGHT)
 
-    # Rescale: Markowitz splits the capital, Kelly determined the total
-    final_weights = opt_weights * kelly_total
-    final_weights = final_weights.clip(upper=MAX_WEIGHT)
+    # ── Combine: Markowitz longs + Kelly shorts ───────────────────────────────
+    final_weights = pd.concat([final_long, short_series])
 
     return final_weights.to_dict()
 

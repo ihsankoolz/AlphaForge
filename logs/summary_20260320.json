@@ -1,0 +1,18 @@
+{
+  "date": "2026-03-20",
+  "timestamp": "2026-03-20T23:21:38.627471",
+  "mode": "live",
+  "regime": "bear",
+  "signals_above_threshold": 43,
+  "n_positions": 22,
+  "total_invested_pct": -102.3,
+  "top_positions": {
+    "CMG": -0.024947793846577027,
+    "ABNB": -0.024947793846577027,
+    "YUM": -0.024947793846577027,
+    "AIG": -0.024947793846577027,
+    "DPZ": -0.024947793846577027
+  },
+  "elapsed_seconds": 38.7,
+  "execution_ok": true
+}

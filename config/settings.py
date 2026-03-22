@@ -172,8 +172,10 @@ COV_SHRINKAGE_METHOD = "ledoit_wolf"  # "sample" (raw) or "ledoit_wolf" (shrinka
 # ---------------------------------------------------------------------------
 # Short selling
 # ---------------------------------------------------------------------------
-ALLOW_SHORT_SELLING  = False   # enable after universe expands to 129+ stocks
+ALLOW_SHORT_SELLING  = True    # enabled — universe is 129 stocks
 SHORT_MAX_POSITION   = 0.10   # max short position (10% of portfolio)
+SHORT_MAX_TOTAL      = 0.20   # max TOTAL short exposure (20% of portfolio)
+SHORT_MAX_POSITIONS  = 5      # max concurrent short positions
 SHORT_MIN_PROB       = 0.20   # short stocks with pred_proba below this
 SHORT_KELLY_FRACTION = 0.25   # quarter-Kelly for shorts (more conservative)
 

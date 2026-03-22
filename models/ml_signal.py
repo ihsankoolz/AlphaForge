@@ -9,6 +9,8 @@ import warnings
 warnings.filterwarnings("ignore")
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from models.ensemble import EnsembleModel, train_ensemble, ensemble_predict
 from research.strategies.momentum import generate_signals as momentum_signals
 from research.strategies.mean_reversion import generate_signals as mr_signals
 
@@ -165,25 +167,11 @@ def walk_forward_validation(df, initial_train_months=18, retrain_every_months=3)
         X_test  = test[active_features].fillna(0)
         y_test  = test["target"]
 
-        # Class imbalance — top quartile is 25% of data so we
-        # tell XGBoost to upweight the positive class 3x
-        scale_pos_weight = (y_train == 0).sum() / max((y_train == 1).sum(), 1)
+        # Ensemble: XGBoost + LightGBM (50/50 weighted average)
+        # train_ensemble handles class imbalance internally
+        model = train_ensemble(X_train, y_train, xgb_weight=0.5)
 
-        model = xgb.XGBClassifier(
-            n_estimators=300,
-            max_depth=4,
-            learning_rate=0.03,       # slower learning = better generalisation
-            subsample=0.8,
-            colsample_bytree=0.7,
-            min_child_weight=30,      # even more conservative leaf splits
-            scale_pos_weight=scale_pos_weight,
-            eval_metric="auc",
-            random_state=42,
-            verbosity=0
-        )
-        model.fit(X_train, y_train)
-
-        pred_proba = model.predict_proba(X_test)[:, 1]
+        pred_proba = ensemble_predict(model, X_test)
         pred_class = (pred_proba > 0.5).astype(int)
 
         acc = accuracy_score(y_test, pred_class)
@@ -212,7 +200,7 @@ def walk_forward_validation(df, initial_train_months=18, retrain_every_months=3)
             os.makedirs("models", exist_ok=True)
             with open("models/xgb_model.pkl", "wb") as f:
                 pickle.dump({"model": model, "feature_cols": active_features}, f)
-            print(f"\n  → Final model saved to models/xgb_model.pkl")
+            print(f"\n  → Final ensemble model saved to models/xgb_model.pkl")
 
         current_cutoff = next_cutoff
         fold += 1
@@ -314,17 +302,16 @@ def print_feature_importance(df):
     X = df[active_features].fillna(0)
     y = df["target"]
 
-    model = xgb.XGBClassifier(
-        n_estimators=300, max_depth=4, learning_rate=0.03,
-        subsample=0.8, colsample_bytree=0.7, min_child_weight=30,
-        eval_metric="auc", random_state=42, verbosity=0
-    )
-    model.fit(X, y)
+    model = train_ensemble(X, y, xgb_weight=0.5)
+    importance = model.feature_importances()
 
-    importance = pd.Series(model.feature_importances_, index=active_features)
+    if importance is None:
+        print("\n  Could not compute feature importance")
+        return
+
     importance = importance.sort_values(ascending=False)
 
-    print("\n========== FEATURE IMPORTANCE (v3 — with sentiment) ==========")
+    print("\n========== FEATURE IMPORTANCE (v4 — ensemble XGB+LGB) ==========")
     for feat, score in importance.items():
         bar = "█" * int(score * 300)
         print(f"  {feat:<22} {score:.4f}  {bar}")
@@ -335,7 +322,7 @@ def print_feature_importance(df):
     sentiment_importance = sum(importance.get(c, 0) for c in sentiment_cols)
     print(f"\n  → Sentiment features combined importance: {sentiment_importance:.4f} "
           f"({sentiment_importance:.1%} of model)")
-    print("===============================================================\n")
+    print("=================================================================\n")
 
 # ── 6. CONVERT TO SIGNALS ────────────────────────────────────────────────────
 
@@ -407,7 +394,7 @@ def generate_signals(
     with open(model_path, "rb") as f:
         bundle = pickle.load(f)
 
-    model        = bundle["model"]         # trained XGBClassifier (final fold)
+    model        = bundle["model"]         # EnsembleModel (XGBoost + LightGBM)
     feature_cols = bundle["feature_cols"]  # exact columns used during training
 
     # ── Normalise time column ─────────────────────────────────────────────────

@@ -108,12 +108,14 @@ def get_account_snapshot(client: TradingClient) -> dict:
     positions_raw = client.get_all_positions()
     positions = {}
     for pos in positions_raw:
+        qty = float(pos.qty)
+        mv  = float(pos.market_value)
         positions[pos.symbol] = {
-            "qty":          float(pos.qty),
-            "market_value": float(pos.market_value),
-            "weight":       float(pos.market_value) / portfolio_value
-                            if portfolio_value > 0 else 0.0,
+            "qty":          qty,
+            "market_value": mv,
+            "weight":       mv / portfolio_value if portfolio_value > 0 else 0.0,
             "avg_cost":     float(pos.avg_entry_price),
+            "current_price": mv / qty if qty != 0 else float(pos.avg_entry_price),
             "unrealized_pl": float(pos.unrealized_pl)
         }
 
@@ -190,6 +192,11 @@ def compute_order_deltas(target_weights: pd.Series,
     """
     Compare target weights vs current holdings to determine what to buy/sell.
 
+    Supports both long and short positions:
+      - Positive target weight → long position (buy)
+      - Negative target weight → short position (sell short)
+      - Zero target weight     → close any existing position
+
     Logic:
       For each symbol in target OR current:
         delta_weight = target_weight - current_weight
@@ -198,8 +205,6 @@ def compute_order_deltas(target_weights: pd.Series,
         otherwise                     → HOLD (avoid unnecessary trading)
 
     The min_weight_change threshold (default 1%) prevents over-trading.
-    If the optimizer nudges a position from 10% to 10.4%, don't bother —
-    the transaction cost would exceed the benefit.
 
     Returns list of order dicts with: symbol, side, dollar_amount
     """
@@ -212,17 +217,28 @@ def compute_order_deltas(target_weights: pd.Series,
     orders = []
     all_symbols = set(target_weights.index) | set(current_weights.keys())
 
+    # Short position cap (from config)
+    try:
+        from config.settings import SHORT_MAX_POSITION
+        short_cap = SHORT_MAX_POSITION
+    except ImportError:
+        short_cap = 0.10
+
     for symbol in all_symbols:
         target_w  = target_weights.get(symbol, 0.0)
         current_w = current_weights.get(symbol, 0.0)
-        delta_w   = target_w - current_w
 
-        # Apply hard position cap to target
+        # Apply hard position cap to target (long and short)
         if target_w > MAX_POSITION_PCT:
             log.warning(f"{symbol}: target weight {target_w:.1%} exceeds "
                         f"cap {MAX_POSITION_PCT:.0%} — clamping")
             target_w = MAX_POSITION_PCT
-            delta_w  = target_w - current_w
+        elif target_w < -short_cap:
+            log.warning(f"{symbol}: short weight {target_w:.1%} exceeds "
+                        f"cap -{short_cap:.0%} — clamping")
+            target_w = -short_cap
+
+        delta_w = target_w - current_w
 
         # Skip tiny changes — not worth the transaction cost
         if abs(delta_w) < min_weight_change:
@@ -235,22 +251,28 @@ def compute_order_deltas(target_weights: pd.Series,
             continue
 
         side = OrderSide.BUY if delta_w > 0 else OrderSide.SELL
+        # Include current qty for full-liquidation sells (avoids fractional rounding)
+        pos_info = current_snapshot["positions"].get(symbol, {})
         orders.append({
             "symbol":        symbol,
             "side":          side,
             "dollar_amount": dollar_amount,
             "delta_weight":  delta_w,
             "target_weight": target_w,
-            "current_weight": current_w
+            "current_weight": current_w,
+            "current_qty":   pos_info.get("qty"),
+            "approx_price":  pos_info.get("current_price", 0),
         })
 
     # IMPORTANT: always process SELLS before BUYS
     # Selling first frees up cash so buys don't fail due to insufficient funds
     orders.sort(key=lambda x: 0 if x["side"] == OrderSide.SELL else 1)
 
-    log.info(f"Order deltas computed: "
-             f"{sum(1 for o in orders if o['side'] == OrderSide.SELL)} sells, "
-             f"{sum(1 for o in orders if o['side'] == OrderSide.BUY)} buys")
+    n_sells = sum(1 for o in orders if o["side"] == OrderSide.SELL)
+    n_buys  = sum(1 for o in orders if o["side"] == OrderSide.BUY)
+    n_shorts = sum(1 for o in orders if o["target_weight"] < 0)
+    log.info(f"Order deltas computed: {n_sells} sells, {n_buys} buys"
+             f"{f', {n_shorts} short positions' if n_shorts else ''}")
 
     return orders
 
@@ -300,12 +322,61 @@ def place_orders(client: TradingClient,
             continue
 
         try:
-            req = MarketOrderRequest(
-                symbol       = symbol,
-                notional     = dollar_amount,   # dollar amount, not shares
-                side         = side,
-                time_in_force= TimeInForce.DAY
+            # Determine order type:
+            # 1. Full liquidation (target=0) → use exact qty to avoid rounding
+            # 2. Short sells → must use whole share qty (Alpaca rejects fractional shorts)
+            # 3. Everything else → use notional (dollar amount)
+            is_full_liquidation = (
+                side == OrderSide.SELL
+                and order["target_weight"] == 0.0
+                and order.get("current_qty") is not None
             )
+            is_short_sell = order["target_weight"] < 0
+
+            if is_full_liquidation:
+                req = MarketOrderRequest(
+                    symbol        = symbol,
+                    qty           = order["current_qty"],
+                    side          = side,
+                    time_in_force = TimeInForce.DAY
+                )
+            elif is_short_sell:
+                # Alpaca does not allow fractional short sells — use whole shares.
+                # Get price: from snapshot if held, otherwise fetch latest trade.
+                import math
+                approx_price = order.get("approx_price", 0)
+                if approx_price <= 0:
+                    try:
+                        from alpaca.data import StockHistoricalDataClient
+                        from alpaca.data.requests import StockLatestTradeRequest
+                        data_client = StockHistoricalDataClient(
+                            os.getenv("ALPACA_API_KEY"),
+                            os.getenv("ALPACA_SECRET_KEY"),
+                        )
+                        trade = data_client.get_stock_latest_trade(
+                            StockLatestTradeRequest(symbol_or_symbols=symbol)
+                        )
+                        approx_price = float(trade[symbol].price)
+                    except Exception as e:
+                        log.warning(f"{symbol}: could not fetch price for short ({e}) — skipping")
+                        continue
+                whole_qty = math.floor(dollar_amount / approx_price)
+                if whole_qty < 1:
+                    log.info(f"{symbol}: short ${dollar_amount:.0f} / ${approx_price:.2f} = 0 shares — skipping")
+                    continue
+                req = MarketOrderRequest(
+                    symbol        = symbol,
+                    qty           = whole_qty,
+                    side          = side,
+                    time_in_force = TimeInForce.DAY
+                )
+            else:
+                req = MarketOrderRequest(
+                    symbol        = symbol,
+                    notional      = dollar_amount,   # dollar amount, not shares
+                    side          = side,
+                    time_in_force = TimeInForce.DAY
+                )
             result = client.submit_order(req)
             placed.append({
                 "id": str(result.id),

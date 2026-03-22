@@ -25,7 +25,7 @@ This is not a research notebook. It is a system — each component has a specifi
 | 2 | Data Layer Completion | ✅ Done |
 | 3 | Feature Engineering & Traditional Strategies | ✅ Done |
 | 4 | Regime Detection with Hidden Markov Models | ✅ Done |
-| 5 | ML Signal Generation (XGBoost) | ✅ Done |
+| 5 | ML Signal Generation (XGBoost + LightGBM Ensemble) | ✅ Done |
 | 6 | Sentiment Layer as Alternative Data | ✅ Done |
 | 6.5 | Sentiment Integration into ML Model (v3) | ✅ Done |
 | 7 | Risk & Portfolio Layer (Kelly + Markowitz) | ✅ Done |
@@ -36,7 +36,7 @@ This is not a research notebook. It is a system — each component has a specifi
 | 9.5 | Microservice Architecture (Docker + docker-compose) | ✅ Done |
 | 10 | Polish, Documentation & Write-Up | ⏳ Upcoming |
 
-**Note on universe expansion:** Deliberately deferred until after the execution layer was working. Batch 1 (50 new symbols) and Batch 2 (50 more symbols) both completed. System now configured for 129 stocks across 20+ sectors. Short selling now unblocked (universe > 129).
+**Note on universe expansion:** Deliberately deferred until after the execution layer was working. Batch 1 (50 new symbols) and Batch 2 (50 more symbols) both completed. System now configured for 129 stocks across 20+ sectors. Short selling enabled (`ALLOW_SHORT_SELLING=True`). LightGBM ensemble wired into live pipeline (XGBoost + LightGBM 50/50 weighted average).
 
 ---
 
@@ -387,10 +387,10 @@ Just sitting in cash during 357 choppy days doubled the return and improved risk
 
 ---
 
-## Week 5 — ML Signal Generation (XGBoost)
+## Week 5 — ML Signal Generation (XGBoost + LightGBM Ensemble)
 
 ### What We Built
-`models/ml_signal.py` — XGBoost classifier trained via walk-forward validation to predict which stocks will be top-quartile performers over the next 5 days. Output is a probability score per stock per day used as trading signal strength.
+`models/ml_signal.py` — XGBoost + LightGBM ensemble trained via walk-forward validation to predict which stocks will be top-quartile performers over the next 5 days. Both models are trained independently with different hyperparameters (XGBoost depth=4, LightGBM depth=5, different random seeds) and their predictions are averaged 50/50. Output is a probability score per stock per day used as trading signal strength. Graceful fallback to XGBoost-only if LightGBM isn't installed.
 
 `research/strategies/ml_backtest.py` — backtests trading using ML probability scores as signals, with signal-weighted position sizing.
 
@@ -1337,8 +1337,8 @@ AlphaForge/
 ├── models/
 │   ├── regime_hmm.py                          ← trains HMM; predict_regime() live wrapper
 │   ├── hmm_model.pkl                          ← trained HMM + scaler — retrained on 79 symbols
-│   ├── ml_signal.py                           ← XGBoost v3; generate_signals() + non-overlapping AUC
-│   ├── xgb_model.pkl                          ← trained XGBoost v3 — retrained on 79 symbols
+│   ├── ml_signal.py                           ← XGBoost + LightGBM ensemble v4; generate_signals() + non-overlapping AUC
+│   ├── xgb_model.pkl                          ← trained ensemble (XGB+LGB) — retrained on 129 symbols
 │   ├── sentiment.py                           ← FinBERT pipeline; now produces has_news feature
 │   ├── versioning.py                          ← NEW: model versioning with timestamped saves + rollback
 │   ├── ensemble.py                            ← NEW: XGBoost + LightGBM ensemble stacking with agreement tracking
@@ -1414,7 +1414,7 @@ zoneinfo         ← timezone handling for market hours check ← NEW Week 8
 pytest           ← unit testing framework ← NEW code review improvements
 streamlit        ← dashboard UI framework ← NEW Week 9
 plotly           ← interactive charts for dashboard ← NEW Week 9
-lightgbm         ← optional: ensemble stacking with XGBoost ← NEW (graceful fallback if absent)
+lightgbm         ← required: ensemble stacking with XGBoost (graceful fallback to XGB-only if absent)
 redis            ← inter-service messaging for microservices ← NEW microservice architecture
 ```
 
@@ -1481,6 +1481,21 @@ This section documents a comprehensive code review performed across the entire c
 | `services/*/main.py` | Service entrypoints for ingest, features, sentiment, regime, signals, risk, execution, dashboard |
 
 ### Bug Fixes
+
+**Short positions stripped by Markowitz optimizer** (`risk/portfolio_optimiser.py`)
+- **What:** `optimize_weights()` was passing all symbols (long and short) into `maximise_sharpe()`, which is a long-only optimizer (bounds ≥ 0, `sum(w) = 1`). Short (negative) Kelly weights were converted to small positive values, and `kelly_total` was computed as the net of longs minus shorts rather than gross long capital.
+- **Why:** `maximise_sharpe()` uses SLSQP with `bounds = [(MIN_WEIGHT, MAX_WEIGHT)]` — it physically cannot produce negative weights. The result was that all 5 short positions were silently discarded after Kelly correctly sized them, and TRV flipped from -4.1% Kelly to +1.5% Markowitz.
+- **Fix:** Separated long and short positions before optimization. Markowitz now only sees long symbols. `kelly_total` is gross long sum only. Short weights from Kelly pass through unchanged and are concatenated with Markowitz longs at the end.
+- **Impact:** Short positions now survive the risk layer. Pipeline summary will show correct `N long + M short` with non-zero short% invested.
+
+**`KeyError: 'label_map'` in regime detection** (`models/regime_hmm.py`)
+- **What:** `predict_regime()` used `bundle["label_map"]` but the pkl saved by `expand_universe_batch2.py` only contained `{model, scaler, feature_cols}` — no `label_map` key.
+- **Why:** Every pipeline run defaulted to 'choppy' regime → pure cash → no long positions placed despite valid signals.
+- **Fix:** Changed to `bundle.get("label_map")` with a volatility-based fallback: states are sorted by mean volatility and labeled bull/choppy/bear in order.
+
+**Fractional short sell rejection** (`execution/order_manager.py`)
+- **What:** Alpaca paper trading rejects fractional short sell orders (error code 42210000).
+- **Fix:** Added `is_short_sell` detection in `place_orders()`. Short orders now fetch the latest trade price from Alpaca's data API and compute `floor(dollar_amount / price)` to get whole shares. Orders with 0 whole shares are skipped with a log message.
 
 **Lookahead bias in volatility adjustment** (`risk/position_sizer.py`)
 - **What:** Changed `features_df["date"] <= date` to `features_df["date"] < date`
@@ -1570,7 +1585,7 @@ This section documents a comprehensive code review performed across the entire c
 
 4. ~~**Transaction cost model**~~ → **FIXED.** Added `risk/transaction_costs.py` with per-stock cost model: half-spread (liquidity-tiered, 0.5-5bp) + square-root market impact. Replaces flat 0.1% in ml_backtest.py. Configurable via `config/settings.py`.
 
-5. ~~**Short selling**~~ → **IMPLEMENTED (disabled by default).** Added `short_kelly_weights()` to `risk/position_sizer.py` with quarter-Kelly sizing for short positions. Stocks with `pred_proba < SHORT_MIN_PROB` (0.20) are candidates. Capped at 10% per short position. Integrated into `compute_positions()` — when `ALLOW_SHORT_SELLING=True` in settings, the pipeline produces negative weights for shorts alongside positive weights for longs. Disabled by default due to universe composition bias; enable after universe expands to 129+ stocks.
+5. ~~**Short selling**~~ → **ENABLED.** Added `short_kelly_weights()` to `risk/position_sizer.py` with quarter-Kelly sizing for short positions. Stocks with `pred_proba < SHORT_MIN_PROB` (0.20) are candidates. Capped at 10% per short position. Integrated into `compute_positions()` — pipeline produces negative weights for shorts alongside positive weights for longs. `order_manager.py` updated to handle negative weights (short orders). `run_daily.py` logs long/short positions separately. `ALLOW_SHORT_SELLING=True` in settings now that universe is 129 stocks.
 
 6. ~~**Turnover constraint**~~ → **FIXED.** Added turnover penalty (L1 norm × λ) to `maximise_sharpe()` in `risk/portfolio_optimiser.py`. Optimizer now penalizes weight changes vs previous day, reducing unnecessary trading. λ configurable via `TURNOVER_PENALTY_LAMBDA` in settings.
 
@@ -1586,7 +1601,7 @@ This section documents a comprehensive code review performed across the entire c
 
 12. ~~**No stress testing / scenario analysis**~~ → **FIXED.** Added `analytics/stress_testing.py` with: historical crisis replay (COVID crash, 2022 rate hike, SVB crisis, Aug 2024 unwind — measures total return, max drawdown, worst/best day per crisis window), parametric stress (apply 1x-3x multipliers to returns, measure VaR/CVaR/drawdown under amplified moves), Monte Carlo VaR (10,000-path simulation from fitted normal, 5-day horizon, reports VaR/CVaR/worst/best path and % negative outcomes), correlation stress (estimate portfolio vol under rising correlations from 0.3 to 1.0 — crisis mode), sector concentration stress (measure portfolio impact from sector-specific drawdowns like "Tech -20%"). Pure functions, no I/O. Composite `stress_report()` runs all analyses. 35 tests.
 
-13. ~~**No ensemble methods**~~ → **IMPLEMENTED.** Added `models/ensemble.py` with `EnsembleModel` class that stacks XGBoost + LightGBM. Weighted average predictions (default 50/50, configurable). Graceful fallback when LightGBM isn't installed (XGBoost-only mode). Includes `model_agreement()` function that measures prediction correlation, class disagreement rate, and per-sample agreement between the two models — useful as a confidence signal. Averaged `feature_importances()` across both models. Convenience functions `train_ensemble()` and `ensemble_predict()`. Different hyperparameters between models (XGBoost depth=4, LightGBM depth=5; different random seeds) for diversity. 27 tests.
+13. ~~**No ensemble methods**~~ → **WIRED INTO LIVE PIPELINE.** `models/ensemble.py` `EnsembleModel` class stacks XGBoost + LightGBM (50/50 weighted average). Now fully integrated: `ml_signal.py` walk-forward validation trains ensemble instead of standalone XGBoost, `generate_signals()` loads and runs the ensemble for live inference, `xgb_model.pkl` now contains the full ensemble. Graceful fallback to XGBoost-only if LightGBM isn't installed. `model_agreement()` measures prediction correlation and class disagreement. Different hyperparameters (XGBoost depth=4, LightGBM depth=5; different seeds) for diversity. 27 tests.
 
 14. ~~**No walk-forward / rolling-window analysis**~~ → **FIXED.** Added `analytics/walk_forward.py` with: rolling-window performance metrics (Sharpe, return, drawdown, volatility, win rate per non-overlapping quarter), P&L attribution by regime (total return, mean daily, Sharpe, % of total PnL per regime), P&L attribution by calendar period (month/quarter/year with cumulative tracking), performance stability metrics (% profitable windows, Sharpe std, return consistency ratio, worst/best window), out-of-sample degradation detection (first-half vs second-half Sharpe comparison, flags >0.3 drop). Composite `walk_forward_report()` runs all analyses. 33 tests.
 
@@ -1756,4 +1771,4 @@ Each service publishes events to Redis channels (`alphaforge:pipeline`, `alphafo
 
 ---
 
-*Last updated: March 2026 — 24 improvements implemented. Latest: Universe Batch 2 expansion (50 new symbols → 129 total, 8 new sub-sectors), microservice architecture (Docker + docker-compose, 8 services, TimescaleDB + Redis). Paper trading confirmed stable (3+ weeks). All 260 tests passing across 10 test files. Short selling unblocked (universe > 129). Next: Week 10 polish & documentation.*
+*Last updated: March 2026 — 29 improvements implemented. Latest: Fixed Markowitz optimizer stripping short positions (now separates longs/shorts before optimization), fixed regime detection label_map KeyError with volatility-based fallback, fixed fractional short sell rejection (whole-share calculation via Alpaca data API). LightGBM ensemble live (XGBoost + LightGBM 50/50). Short selling fully wired end-to-end. Universe: 129 stocks. Next: Week 10 polish & documentation.*

@@ -351,7 +351,8 @@ def run_ml_signals(
     regime,
 ) -> pd.DataFrame | None:
     """
-    Load xgb_model.pkl and generate pred_proba for every symbol for today.
+    Load xgb_model.pkl (XGBoost + LightGBM ensemble) and generate
+    pred_proba for every symbol for today.
 
     The model was trained with:
         - 22 base features (from features_daily.parquet)
@@ -385,17 +386,25 @@ def run_ml_signals(
             raise ValueError(f'generate_signals must return columns {required_cols}, got {signals_df.columns.tolist()}')
 
         above_threshold = signals_df[signals_df['pred_proba'] >= 0.35]
+        below_short     = signals_df[signals_df['pred_proba'] < 0.20]
         logger.info(
             f'Signals generated — {len(signals_df)} symbols scored, '
-            f'{len(above_threshold)} above 0.35 threshold'
+            f'{len(above_threshold)} long candidates (>=0.35), '
+            f'{len(below_short)} short candidates (<0.20)'
         )
 
         if len(above_threshold) > 0:
             top5 = above_threshold.nlargest(min(5, len(above_threshold)), 'pred_proba')
             for _, row in top5.iterrows():
-                logger.info(f'  {row["symbol"]:<6} pred_proba={row["pred_proba"]:.4f}')
-        else:
-            logger.warning('No symbols above 0.35 threshold — pipeline will hold cash today')
+                logger.info(f'  LONG  {row["symbol"]:<6} pred_proba={row["pred_proba"]:.4f}')
+
+        if len(below_short) > 0:
+            bot5 = below_short.nsmallest(min(5, len(below_short)), 'pred_proba')
+            for _, row in bot5.iterrows():
+                logger.info(f'  SHORT {row["symbol"]:<6} pred_proba={row["pred_proba"]:.4f}')
+
+        if len(above_threshold) == 0 and len(below_short) == 0:
+            logger.warning('No symbols above 0.35 or below 0.20 — pipeline will hold cash today')
 
         return signals_df
 
@@ -453,11 +462,14 @@ def run_risk_layer(
         return {}
 
     n_positions  = len(kelly_weights)
-    total_invested = sum(kelly_weights.values())
+    long_weights  = {s: w for s, w in kelly_weights.items() if w > 0}
+    short_weights = {s: w for s, w in kelly_weights.items() if w < 0}
+    total_long  = sum(long_weights.values())
+    total_short = abs(sum(short_weights.values()))
     logger.info(
-        f'Kelly — {n_positions} positions selected, '
-        f'{total_invested*100:.1f}% invested, '
-        f'{(1-total_invested)*100:.1f}% cash'
+        f'Kelly — {len(long_weights)} long + {len(short_weights)} short positions, '
+        f'{total_long*100:.1f}% long, {total_short*100:.1f}% short, '
+        f'{(1-total_long)*100:.1f}% cash'
     )
 
     if n_positions == 0:
@@ -594,6 +606,7 @@ def run_pipeline(dry_run: bool = True) -> None:
     # Choppy = pure cash. Do NOT call ML model or optimizer.
     # Rationale: SPY rotation in choppy produced -40.89% return due to 2022
     # rate hike selloff. Pure cash is the empirically proven correct rule.
+    signals_df = None  # initialized here so monitoring section always has it
     if regime == 'choppy':
         divider(logger, 'STEP 5 — ML SIGNAL GENERATION (skipped — choppy regime)')
         logger.info('Choppy regime → holding pure cash. Skipping ML + Risk Layer.')
@@ -644,9 +657,12 @@ def run_pipeline(dry_run: bool = True) -> None:
     logger.info('=' * 60)
     logger.info('  Pipeline Complete')
     logger.info('=' * 60)
+    n_long  = sum(1 for w in target_weights.values() if w > 0)
+    n_short = sum(1 for w in target_weights.values() if w < 0)
     logger.info(f'  Regime      : {regime.upper()}')
-    logger.info(f'  Positions   : {len(target_weights)}')
-    logger.info(f'  Invested    : {sum(target_weights.values())*100:.1f}%')
+    logger.info(f'  Positions   : {n_long} long + {n_short} short')
+    logger.info(f'  Invested    : {sum(w for w in target_weights.values() if w > 0)*100:.1f}% long, '
+                f'{abs(sum(w for w in target_weights.values() if w < 0))*100:.1f}% short')
     logger.info(f'  Execution   : {"OK" if execution_ok else "FAILED"}')
     logger.info(f'  Elapsed     : {elapsed:.1f}s')
     logger.info(f'  Mode        : {"DRY RUN" if dry_run else "LIVE PAPER TRADING"}')

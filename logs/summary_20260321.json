@@ -1,0 +1,18 @@
+{
+  "date": "2026-03-21",
+  "timestamp": "2026-03-21T23:14:34.996170",
+  "mode": "dry_run",
+  "regime": "bear",
+  "signals_above_threshold": 44,
+  "n_positions": 9,
+  "total_invested_pct": 56.4,
+  "top_positions": {
+    "T": 0.07651963025931963,
+    "DXCM": 0.07651963025931963,
+    "LRCX": 0.07651963025931963,
+    "LULU": 0.07651963025931963,
+    "CMG": 0.07651963025931963
+  },
+  "elapsed_seconds": 151.8,
+  "execution_ok": false
+}

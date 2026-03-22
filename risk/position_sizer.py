@@ -26,7 +26,8 @@ import config.settings as _cfg
 from config.settings import (
     KELLY_FRACTION, KELLY_ODDS, MIN_PROB, MAX_POSITION,
     VOL_LOOKBACK, VOL_TARGET, MAX_POSITIONS,
-    SHORT_MAX_POSITION, SHORT_MIN_PROB, SHORT_KELLY_FRACTION,
+    SHORT_MAX_POSITION, SHORT_MAX_TOTAL, SHORT_MAX_POSITIONS,
+    SHORT_MIN_PROB, SHORT_KELLY_FRACTION,
 )
 
 
@@ -280,8 +281,14 @@ def compute_positions(signals_today: pd.DataFrame,
             # Vol-adjust shorts the same way (using absolute values)
             short_abs = short_w.abs()
             short_vol = volatility_adjust(short_abs, features_df, date)
-            # Cap and re-negate
+            # Cap individual positions
             short_vol = short_vol.clip(upper=SHORT_MAX_POSITION)
+            # Keep only top N short candidates by weight
+            short_vol = short_vol.nlargest(SHORT_MAX_POSITIONS)
+            # Cap total short exposure
+            total_short = short_vol.sum()
+            if total_short > SHORT_MAX_TOTAL:
+                short_vol = short_vol * (SHORT_MAX_TOTAL / total_short)
             short_final = -short_vol
             # Combine: long weights are positive, short weights are negative
             final_w = pd.concat([final_long, short_final])
